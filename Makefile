@@ -49,7 +49,7 @@ TARGETS := x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linu
 # drift from the pin.
 RUST_CHANNEL := $(shell grep -m1 '^channel' rust-toolchain.toml | sed -E 's/.*"([^"]*)".*/\1/')
 
-.PHONY: help build release test lint fmt vendor release-artifacts cross run run-mock stop clean check toolchain
+.PHONY: help build release test lint fmt vendor release-artifacts cross run run-mock stop clean check toolchain docker-build docker-run docker-stop docker-logs docker-clean
 
 # Bare `make` prints help rather than building, so a stray invocation never
 # kicks off a network install or a build by surprise.
@@ -146,6 +146,35 @@ stop: ## Stop the process listening on WEBCONFIG_PORT (default: 8443)
 
 clean: ## Remove target/
 	$(CARGO) clean
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+# Production container image: the webconfigd daemon + frontend + schemas +
+# board manifest in the canonical install layout. See docker/Dockerfile.
+
+## docker-build — build the production webconfigd image (host arch)
+docker-build:
+	$(MAKE) -C docker build IMAGE_NAME=$(shell basename $$(pwd) | tr 'A-Z' 'a-z' | sed 's/-configuration/-webconfigd/')
+
+## docker-build-arm64 — cross-build the arm64 webconfigd image
+
+docker-build-arm64:
+	$(MAKE) -C docker build-arm64 IMAGE_NAME=$(shell basename $$(pwd) | tr 'A-Z' 'a-z' | sed 's/-configuration/-webconfigd/')
+
+## docker-run — run the container (production, port 8443)
+docker-run:
+	$(MAKE) -C docker run IMAGE_NAME=$(shell basename $$(pwd) | tr 'A-Z' 'a-z' | sed 's/-configuration/-webconfigd/')
+
+## docker-stop — stop and remove the container
+docker-stop:
+	$(MAKE) -C docker stop
+
+## docker-logs — tail container logs
+docker-logs:
+	$(MAKE) -C docker logs
+
+## docker-clean — remove the built image
+docker-clean:
+	$(MAKE) -C docker clean IMAGE_NAME=$(shell basename $$(pwd) | tr 'A-Z' 'a-z' | sed 's/-configuration/-webconfigd/')
 
 # Convenience alias: full validation gate (§9 step 6).
 check: build test lint ## Full validation gate: build && test && lint
