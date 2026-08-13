@@ -1,6 +1,6 @@
 # Acadia-Configuration
 
-**Remote:** `git@github.com:SiliconCentric/Acadia-Configuration.git`
+**Remote:** `git@github.com:soccentric-acadia/Acadia-Configuration.git`
 **Parent project:** [Acadia](../Acadia.md) (target hardware: **Raspberry Pi 5**.)
 **Leaf type:** `<Project>-Configuration`
 **Status:** REAL — actively built out
