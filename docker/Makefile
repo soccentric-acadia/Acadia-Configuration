@@ -11,12 +11,12 @@ IMAGE      := $(IMAGE_NAME):$(TAG)
 
 build:
 	@echo "Building Docker image $(IMAGE) ..."
-	docker build -f Dockerfile -t $(IMAGE) .
+	docker build -f Dockerfile -t $(IMAGE) ..
 
 # Cross-arch (e.g. build the arm64 image on an x86 host). Requires buildx + a
 # builder with the target platform driver enabled.
 build-arm64:
-	docker buildx build --platform linux/arm64 --load -f Dockerfile -t $(IMAGE)-arm64 .
+	docker buildx build --platform linux/arm64 --load -f Dockerfile -t $(IMAGE)-arm64 ..
 
 run:
 	@echo "Running $(IMAGE) (port 8443) ..."
