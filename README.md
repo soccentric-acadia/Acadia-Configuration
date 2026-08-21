@@ -1,28 +1,26 @@
 # SoCcentric WebConfig
 
-An **on-device, browser-based configuration web UI** for the Acadia
-Yocto/embedded-Linux platform (Raspberry Pi 5). One small Rust daemon serves a vanilla-JS
-frontend over TLS; board-specific data lives in a single board-manifest file
-(`board-manifests/acadia.json`).
+An **on-device, browser-based configuration web UI** for the Acadia Yocto/embedded-Linux
+platform (Raspberry Pi 5). One small Rust daemon serves a vanilla-JS frontend over TLS;
+board-specific data lives in a single board-manifest file (`board-manifests/acadia.json`).
 
 > The full design specification lives in [`docs/webconfig-spec.md`](docs/webconfig-spec.md).
 
 ## What it is
 
-A field engineer or operator points a browser at the device
-(`https://<device>:8443`) and configures it: system identity, networking,
-services, updates, monitoring, logs, alerts, security, and I/O — all behind
-authenticated, role-based access with a commit/confirm rollback safety net for
-networking changes.
+A field engineer or operator points a browser at the device (`https://<device>:8443`) and
+configures it: system identity, networking, services, updates, monitoring, logs, alerts,
+security, and I/O — all behind authenticated, role-based access with a commit/confirm rollback
+safety net for networking changes.
 
-- **One daemon**, `current_thread` tokio runtime, rustls (no OpenSSL), no
-  database (JSON + ring files). Target: <15 MB RAM, 3-6 MB stripped binary.
+- **One daemon**, `current_thread` tokio runtime, rustls (no OpenSSL), no database (JSON + ring
+files). Target: <15 MB RAM, 3-6 MB stripped binary.
 - **Vanilla JS frontend**, no build step, no node at build time, <500 KB total.
 - **Schema-driven rendering**: adding a setting is a schema file — zero UI code.
-- **Flagship networking rollback**: network changes are provisional; reconnect
-  and confirm within a window or they auto-roll-back.
-- **Real + mock system interactions**: RAUC/zbus talk to real backends on-device
-  and to mocks on the fake-sysroot test harness (no hardware to test).
+- **Flagship networking rollback**: network changes are provisional; reconnect and confirm
+within a window or they auto-roll-back.
+- **Real + mock system interactions**: RAUC/zbus talk to real backends on-device and to mocks on
+the fake-sysroot test harness (no hardware to test).
 
 ## Repository layout
 
@@ -57,9 +55,8 @@ Validation gate (used by the git workflows and CI): `make build && make test && 
 
 ## Cross-targets
 
-`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
-`armv7-unknown-linux-gnueabihf`. Vendored crates + `CARGO_NET_OFFLINE=1` make
-builds fully offline and reproducible.
+`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`.
+Vendored crates + `CARGO_NET_OFFLINE=1` make builds fully offline and reproducible.
 
 ## Deploying (Yocto)
 
@@ -70,8 +67,8 @@ IMAGE_INSTALL:append = " webconfigd webconfig-static webconfig-schemas webconfig
 ```
 
 Map your BSP `MACHINE` to its board manifest in
-`meta-webconfig/recipes-core/webconfig/webconfig-manifest.bbappend`.
-See [`meta-webconfig/README.md`](meta-webconfig/README.md).
+`meta-webconfig/recipes-core/webconfig/webconfig-manifest.bbappend`. See
+[`meta-webconfig/README.md`](meta-webconfig/README.md).
 
 ## Documentation
 
@@ -79,9 +76,10 @@ See [`meta-webconfig/README.md`](meta-webconfig/README.md).
 - [REST API reference](docs/api-reference.md)
 - [Schema format](docs/schema-format.md)
 - [Board-manifest format](docs/board-manifest.md)
-- [Production-readiness audit](docs/planning/MasterPlan.md) and its [acceptance checklist](docs/planning/Checkpoint.md)
+- [Production-readiness audit](docs/planning/MasterPlan.md) and its [acceptance
+checklist](docs/planning/Checkpoint.md)
 
-## Feature Matrix
+## Feature Status
 
 | # | Name / Description | Implemented? | Test Coverage? | Manual Test |
 |---:|---|---|---|---|
@@ -99,13 +97,31 @@ See [`meta-webconfig/README.md`](meta-webconfig/README.md).
 
 ## Project Description
 
-Acadia-Configuration is the on-device WebConfig service for configuring an Acadia embedded-Linux board from a browser. It is a Rust workspace composed of `webconfig-engine`, which owns configuration state and policy, and `webconfigd`, which exposes the daemon and HTTP surface. The engine includes manifest and JSON-schema handling, persistent storage, backups, audit records, monitoring, alerts, user management, update coordination, and a fake-sysroot boundary used by host tests. Its appliers translate requested settings into system interactions for networking, Wi-Fi, WireGuard, firewall, hostname, time, serial, GPIO, CAN, SSH, journald, and access-point behavior. Board-specific data is supplied by `board-manifests/`, with schemas under `schemas/` and Yocto packaging under `meta-webconfig/`.
+Acadia-Configuration is the on-device WebConfig service for configuring an Acadia embedded-Linux
+board from a browser. It is a Rust workspace composed of `webconfig-engine`, which owns
+configuration state and policy, and `webconfigd`, which exposes the daemon and HTTP surface. The
+engine includes manifest and JSON-schema handling, persistent storage, backups, audit records,
+monitoring, alerts, user management, update coordination, and a fake-sysroot boundary used by
+host tests. Its appliers translate requested settings into system interactions for networking,
+Wi-Fi, WireGuard, firewall, hostname, time, serial, GPIO, CAN, SSH, journald, and access-point
+behavior. Board-specific data is supplied by `board-manifests/`, with schemas under `schemas/`
+and Yocto packaging under `meta-webconfig/`.
 
-The daemon uses Tokio, Axum, rustls, authentication, CSRF protection, TLS setup, route modules, background jobs, systemd integration, and server-sent events. The frontend is buildless vanilla JavaScript with schema-driven forms and page scripts. Network changes have a commit/confirm rollback model, but successful operation against real device services is environment-dependent. The repository documents compact deployment and cross-targets for x86_64, aarch64, and armv7.
+The daemon uses Tokio, Axum, rustls, authentication, CSRF protection, TLS setup, route modules,
+background jobs, systemd integration, and server-sent events. The frontend is buildless vanilla
+JavaScript with schema-driven forms and page scripts. Network changes have a commit/confirm
+rollback model, but successful operation against real device services is environment-dependent.
+The repository documents compact deployment and cross-targets for x86_64, aarch64, and armv7.
 
-The root Makefile is the main workflow: `make build`, `make test`, `make lint`, `make release`, `make vendor`, `make cross`, and `make run`. Rust tests are present in the engine and `crates/webconfigd/src/tests.rs`; the documented test path uses a fake sysroot and does not prove hardware behavior. This summary separates code presence from verified device behavior.
+The root Makefile is the main workflow: `make build`, `make test`, `make lint`, `make release`,
+`make vendor`, `make cross`, and `make run`. Rust tests are present in the engine and
+`crates/webconfigd/src/tests.rs`; the documented test path uses a fake sysroot and does not
+prove hardware behavior. This summary separates code presence from verified device behavior.
 
-The service is intended to keep failure-prone changes recoverable: a configuration request is validated, applied through an applier, persisted, and, for networking, confirmed or rolled back. That lifecycle crosses HTTP, filesystem, systemd, and board-manifest boundaries, so deployment permissions and service availability remain part of acceptance rather than assumptions.
+The service is intended to keep failure-prone changes recoverable: a configuration request is
+validated, applied through an applier, persisted, and, for networking, confirmed or rolled back.
+That lifecycle crosses HTTP, filesystem, systemd, and board-manifest boundaries, so deployment
+permissions and service availability remain part of acceptance rather than assumptions.
 
 ## Test Evidence
 
