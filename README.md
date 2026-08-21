@@ -81,6 +81,37 @@ See [`meta-webconfig/README.md`](meta-webconfig/README.md).
 - [Board-manifest format](docs/board-manifest.md)
 - [Production-readiness audit](docs/planning/MasterPlan.md) and its [acceptance checklist](docs/planning/Checkpoint.md)
 
+## Feature Matrix
+
+| # | Name / Description | Implemented? | Test Coverage? | Manual Test |
+|---:|---|---|---|---|
+| 1 | Rust workspace and release profile | Implemented | Build/lint commands documented; execution not verified here | [ ] Manual verification required |
+| 2 | Configuration engine and persistent store | Implemented | Engine tests present; extent not fully mapped | [ ] Manual verification required |
+| 3 | JSON schema and board-manifest loading | Implemented | Unknown | [ ] Manual verification required |
+| 4 | System appliers for network, security, services, I/O, and time | Implemented | Fake-sysroot integration path documented | [ ] Manual verification required |
+| 5 | Commit/confirm network rollback | Implemented | Unknown | [ ] Manual verification required |
+| 6 | Auth, roles, CSRF, and TLS | Implemented | Daemon tests present; scope unknown | [ ] Manual verification required |
+| 7 | HTTP section APIs and SSE | Implemented | HTTP integration tests present | [ ] Manual verification required |
+| 8 | Alerts, monitoring, audit, backups, and updates | Partial: code exists; feature-level coverage varies | Partial | [ ] Manual verification required |
+| 9 | Vanilla-JS schema-driven frontend | Implemented | Unknown | [ ] Manual verification required |
+| 10 | Yocto layer and deployable packages | Implemented | Unknown | [ ] Manual verification required |
+| 11 | Offline vendor and cross-target builds | Implemented | Documentation/command evidence only | [ ] Manual verification required |
+
+## Project Description
+
+Acadia-Configuration is the on-device WebConfig service for configuring an Acadia embedded-Linux board from a browser. It is a Rust workspace composed of `webconfig-engine`, which owns configuration state and policy, and `webconfigd`, which exposes the daemon and HTTP surface. The engine includes manifest and JSON-schema handling, persistent storage, backups, audit records, monitoring, alerts, user management, update coordination, and a fake-sysroot boundary used by host tests. Its appliers translate requested settings into system interactions for networking, Wi-Fi, WireGuard, firewall, hostname, time, serial, GPIO, CAN, SSH, journald, and access-point behavior. Board-specific data is supplied by `board-manifests/`, with schemas under `schemas/` and Yocto packaging under `meta-webconfig/`.
+
+The daemon uses Tokio, Axum, rustls, authentication, CSRF protection, TLS setup, route modules, background jobs, systemd integration, and server-sent events. The frontend is buildless vanilla JavaScript with schema-driven forms and page scripts. Network changes have a commit/confirm rollback model, but successful operation against real device services is environment-dependent. The repository documents compact deployment and cross-targets for x86_64, aarch64, and armv7.
+
+The root Makefile is the main workflow: `make build`, `make test`, `make lint`, `make release`, `make vendor`, `make cross`, and `make run`. Rust tests are present in the engine and `crates/webconfigd/src/tests.rs`; the documented test path uses a fake sysroot and does not prove hardware behavior. This summary separates code presence from verified device behavior.
+
+The service is intended to keep failure-prone changes recoverable: a configuration request is validated, applied through an applier, persisted, and, for networking, confirmed or rolled back. That lifecycle crosses HTTP, filesystem, systemd, and board-manifest boundaries, so deployment permissions and service availability remain part of acceptance rather than assumptions.
+
+## Test Evidence
+
+- `crates/webconfigd/src/tests.rs` and engine tests under `crates/webconfig-engine/src/`.
+- Recommended gate: `make build && make test && make lint`.
+
 ## License
 
 CLOSED (SoCcentric internal IV&V tooling).
