@@ -198,7 +198,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_Acadia_manifest() {
+    fn parse_acadia_manifest() {
         let raw = include_str!("../../../board-manifests/acadia.json");
         let m: BoardManifest = serde_json::from_str(raw).unwrap();
         assert_eq!(m.platform, "acadia");

@@ -9,8 +9,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Offline build (spec §2): vendored crates are committed.
-  CARGO_NET_OFFLINE: true
 
 jobs:
   host-test:
