@@ -55,4 +55,12 @@ check "clippy -D warnings + rustfmt --check" "cargo" 'make lint'
 # `make check` is the repo's own documented full gate: build && test && lint.
 check "full gate (build && test && lint)" "cargo" 'make check'
 
+# OS image wiring (task 26/27): webconfig packages must be referenced by the
+# Acadia-OS image recipe so a booted image actually carries webconfigd.
+assert "OS image installs webconfig packages" \
+  'make lint-image-wiring 2>/dev/null || \
+   for p in webconfigd webconfig-static webconfig-schemas webconfig-manifest; do \
+     grep -q "IMAGE_INSTALL:append.*$$p" ../Acadia-OS/meta/meta-acadia/recipes-core/images/acadia-image.bb || exit 1; \
+   done'
+
 report "$TIER"

@@ -69,6 +69,24 @@ release: ## Release build, exact spec §2 profile (opt-level=z, lto, stripped)
 test: ## Engine + HTTP integration tests (fake sysroot, no hardware)
 	$(CARGO) test --workspace --all-targets
 
+test-image: ## Image-level boot integration tests (webconfigd under systemd; requires a booted image)
+	@if command -v bats >/dev/null 2>&1; then \
+		bats meta-webconfig/recipes-core/webconfig/tests; \
+	else \
+		echo "bats not installed — image-level tests skipped (target-required)"; \
+	fi
+
+lint-image-wiring: ## Static check that the OS image installs webconfig packages (task 26/27)
+	@fail=0; \
+	for p in webconfigd webconfig-static webconfig-schemas webconfig-manifest; do \
+		if grep -q "IMAGE_INSTALL:append.*$$p" ../Acadia-OS/meta/meta-acadia/recipes-core/images/acadia-image.bb 2>/dev/null; then \
+			echo "  OK: $$p referenced in acadia-image.bb"; \
+		else \
+			echo "  FAIL: $$p not referenced in Acadia-OS acadia-image.bb"; fail=1; \
+		fi; \
+	done; \
+	[ "$$fail" -eq 0 ] || { echo "ERROR: webconfig packages missing from OS image recipe"; exit 1; }
+
 lint: ## clippy -D warnings + rustfmt --check
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
 	$(CARGO) fmt --all -- --check
