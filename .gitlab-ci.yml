@@ -1,0 +1,15 @@
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+stages: [check]
+
+check:
+  stage: check
+  image: rust:1.97.1-bookworm
+  script:
+    - cargo build --workspace
+    - cargo test --workspace --all-targets
+    - cargo clippy --workspace --all-targets -- -D warnings
+    - cargo fmt --all -- --check
