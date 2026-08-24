@@ -87,6 +87,26 @@ lint-image-wiring: ## Static check that the OS image installs webconfig packages
 	done; \
 	[ "$$fail" -eq 0 ] || { echo "ERROR: webconfig packages missing from OS image recipe"; exit 1; }
 
+lint-checksums: ## Fail if any placeholder/invalid release checksum remains in the recipes (task 28)
+	@fail=0; \
+	echo "Checking release checksums in meta-webconfig recipes..."; \
+	if grep -rn 'TODO_REPLACE_WITH_RELEASED_TARBALL_SHA256' meta-webconfig/recipes-*; then \
+		echo "  FAIL: placeholder checksum present"; fail=1; \
+	else \
+		echo "  OK: no placeholder checksum present"; \
+	fi; \
+	for f in meta-webconfig/recipes-core/webconfig/webconfigd.bb; do \
+		[ -f "$$f" ] || continue; \
+		for var in src vendor; do \
+			sha=$$(grep -oE "SRC_URI\[$$var\.sha256sum\] = \"[0-9a-f]{64}\"" "$$f" | grep -oE '[0-9a-f]{64}'); \
+			if [ -z "$$sha" ]; then \
+				echo "  FAIL: $$f missing a valid 64-hex $$var checksum"; fail=1; \
+			else \
+				echo "  OK: $$var checksum = $$sha"; \
+			fi; \
+		done; \
+	done; \
+	[ "$$fail" -eq 0 ] || { echo "ERROR: release checksum gate failed (task 28)"; exit 1; }
 lint: ## clippy -D warnings + rustfmt --check
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
 	$(CARGO) fmt --all -- --check

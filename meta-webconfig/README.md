@@ -65,8 +65,13 @@ WEBCONFIG_BOARD_FILE:raspberrypi5 = "acadia.json"
 ## Notes / assumptions (spec §7)
 
 - `cargo.bbclass` from oe-core (scarthgap+) is used; `meta-rust` is not required.
-- The vendored tarball and source tarball SHA-256s are placeholders
-  (`TODO_REPLACE_WITH_RELEASED_TARBALL_SHA256`) — a release script fills them.
+- The vendored tarball and source tarball SHA-256s are **real immutable release
+  checksums** recorded in `webconfigd.bb` (`SRC_URI[src.sha256sum]` and
+  `SRC_URI[vendor.sha256sum]`), produced by `make release-artifacts`
+  (`tools/release-artifacts.sh`). Regenerate both at every release cut — the
+  checksum is only valid for the exact tarball contents it was computed from.
+  No `TODO_REPLACE_WITH_RELEASED_TARBALL_SHA256` placeholders remain; the gate
+  (`make lint-checksums`) fails if any reappears.
 - The frontend/manifest/schema files in `files/` are copied from the repo root
   at release time; the repo-root copies are the source of truth for the engine
   and tests.

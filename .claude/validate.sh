@@ -63,4 +63,7 @@ assert "OS image installs webconfig packages" \
      grep -q "IMAGE_INSTALL:append.*$$p" ../Acadia-OS/meta/meta-acadia/recipes-core/images/acadia-image.bb || exit 1; \
    done'
 
+# Task 28: real immutable release checksums, no placeholders.
+assert "release checksums are real (no placeholders)" 'make lint-checksums'
+
 report "$TIER"
