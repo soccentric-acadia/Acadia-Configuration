@@ -606,6 +606,10 @@ pub mod updates {
         pub auto_apply: bool,
         #[serde(default)]
         pub maintenance_window: Option<serde_json::Value>,
+        /// Optional bearer token for authenticated download/OTA (task 35).
+        /// Stored on-device; never returned in responses/backups.
+        #[serde(default, skip_serializing)]
+        pub token: Option<String>,
     }
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize)]

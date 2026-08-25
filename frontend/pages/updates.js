@@ -55,6 +55,24 @@ export async function render(api, store) {
       }, 'Install bundle'))),
   }, el('label', { class: 'field' }, el('span', { class: 'field-label' }, 'Bundle file (browser upload)'), bundleFile), path.wrap);
 
+  // ---------- Remote acquisition (task 35) ----------
+  const webUrl = Field({ label: 'Remote bundle URL', placeholder: 'https://updates.example.com/acadia/release.raucb' });
+  const remoteCard = Card({
+    title: 'Download update from URL',
+    subtitle: 'Authenticated download with resume, signature verification, and staging — completes the previously no-op URL path.',
+    footer: ActionList(
+      ActionRow('Download, verify, stage', 'Fetches the bundle from the URL (optional stored OTA token), verifies signature + compatibility, and stages it for reboot-to-apply.', Button({
+        onClick: async () => {
+          const url = webUrl.get().trim();
+          if (!url) { store.toast('Enter a bundle URL', 'error'); return; }
+          try {
+            const r = await api.post('/api/v1/updates/acquire', { url });
+            store.toast(`Staged: ${r.manifest && r.manifest.platform} ${r.manifest && r.manifest.version}. Reboot to apply.`, 'success');
+          } catch (e) { store.toast(e.message, 'error'); }
+        },
+      }, 'Download + stage'))),
+  }, webUrl.wrap);
+
   // ---------- Confirm + Diagnostics (spec §4.4) ----------
   // A freshly booted image must be confirmed (health-check or manual) or the
   // bootloader rolls it back after N failed boots. The diagnostics bundle is a
@@ -91,5 +109,6 @@ export async function render(api, store) {
     el('div', { class: 'page-header' }, el('h1', {}, 'Updates'), el('p', {}, 'Manage local A/B slots and install signed bundles.')),
     Card({ title: 'A/B slots', subtitle: 'The active and inactive update slots, versions, and confirmation state.' }, slotsTable),
     installCard,
+    remoteCard,
     confirmCard);
 }

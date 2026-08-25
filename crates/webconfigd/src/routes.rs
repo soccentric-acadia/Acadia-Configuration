@@ -119,6 +119,7 @@ pub fn build_router(state: AppState, static_dir: std::path::PathBuf) -> Router {
             "/updates/upload",
             post(updates::upload).layer(RequestBodyLimitLayer::new(UPLOAD_BUNDLE_LIMIT)),
         )
+        .route("/updates/acquire", post(updates::acquire))
         .route("/updates/confirm", post(updates::confirm))
         .route("/updates/reboot-to-apply", post(updates::reboot_to_apply))
         .route("/updates/ota", get(updates::get_ota).put(updates::put_ota))

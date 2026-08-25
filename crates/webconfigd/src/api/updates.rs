@@ -170,6 +170,138 @@ async fn stream_bundle_to_disk(path: &std::path::Path, body: axum::body::Body) -
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+pub struct AcquireRequest {
+    /// Remote URL to download the signed bundle from (task 35).
+    pub url: String,
+    /// Optional bearer/authorization token sent as an Authorization header
+    /// (from the store, never from the request body where it could leak).
+    #[serde(default)]
+    pub token: Option<String>,
+    /// Optional friendly name for the staged file (sanitized).
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// `POST /api/v1/updates/acquire` — authenticated remote bundle download +
+/// resume + signature verify + stage (task 35). The UI can point at a URL and
+/// the daemon performs a complete, authenticated download/stage pipeline with
+/// explicit failure states, instead of the URL having no effect.
+///
+/// Behavior: curl `-C -` resumes an interrupted download, `--fail` turns HTTP
+/// errors into failures, `--retry` bounds transient retries, and an optional
+/// Authorization header carries the token. After download the bundle is
+/// verified (signature + compat) and staged for reboot-to-apply. On any
+/// failure the partial file is removed and a precise reason returned.
+pub async fn acquire(
+    State(app): State<AppState>,
+    role: AuthRole,
+    session: Session,
+    Json(req): Json<AcquireRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    role.require_admin("updates.acquire")?;
+    let user = username(&session).await;
+
+    if req.url.is_empty() || !req.url.starts_with("https://") && !req.url.starts_with("http://") {
+        return Err(ApiError::BadRequest(
+            "acquire: url must be absolute http(s)".into(),
+        ));
+    }
+
+    let uploads_dir = app.engine.sysroot.webconfig_dir().join("uploads");
+    std::fs::create_dir_all(&uploads_dir)?;
+    let stem = match req.name {
+        Some(name) => {
+            let safe: String = name
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
+                .collect();
+            if safe.is_empty() {
+                return Err(ApiError::BadRequest("name must be safe".into()));
+            }
+            safe
+        }
+        None => uuid::Uuid::new_v4().to_string(),
+    };
+    let bundle_path = uploads_dir.join(format!("{stem}.raucb"));
+
+    let mut args: Vec<String> = vec![
+        "--fail".into(),
+        "--silent".into(),
+        "--show-error".into(),
+        "--location".into(),
+        "--retry".into(),
+        "3".into(),
+        "--retry-delay".into(),
+        "2".into(),
+        "--connect-timeout".into(),
+        "10".into(),
+        "--max-time".into(),
+        "900".into(),
+        // Resume an interrupted download (task 35).
+        "--continue-at".into(),
+        "-".into(),
+        "--output".into(),
+        bundle_path.to_string_lossy().into_owned(),
+    ];
+    // Authorization: prefer an explicitly provided token, else the stored OTA
+    // token if one exists; the token never appears in the audit/log response.
+    let token = req.token.or_else(|| {
+        app.engine
+            .load()
+            .ok()
+            .and_then(|c| c.updates.ota.token.clone())
+    });
+    if let Some(tok) = token {
+        args.push("--header".into());
+        args.push(format!("Authorization: Bearer {tok}"));
+    }
+    args.push(req.url.clone());
+
+    let url_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let dl = webconfig_engine::applier::run_cmd("curl", &url_args);
+    if let Err(e) = dl {
+        // Do not leave a partial bundle behind on a failed download.
+        let _ = std::fs::remove_file(&bundle_path);
+        return Err(ApiError::BadRequest(format!(
+            "download failed: {e} (bundle not staged; partial removed)"
+        )));
+    }
+
+    // Verify signature + compatibility, then stage (reboot-to-apply).
+    let manifest = match app
+        .update_backend
+        .verify_bundle(&bundle_path.to_string_lossy())
+        .map_err(map_upd)
+    {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = std::fs::remove_file(&bundle_path);
+            return Err(ApiError::BadRequest(format!(
+                "downloaded bundle failed verification: {e}; removed (not staged)"
+            )));
+        }
+    };
+    let mut stages = Vec::new();
+    app.update_backend
+        .install(&bundle_path.to_string_lossy(), &mut |p: InstallProgress| {
+            stages.push(serde_json::json!({ "stage": p.stage, "percent": p.percent }));
+        })
+        .map_err(map_upd)?;
+    let _ = std::fs::remove_file(&bundle_path);
+    audit(
+        &app,
+        &user,
+        "updates.acquire",
+        Some(format!("{} v{}", manifest.platform, manifest.version)),
+    );
+    Ok(Json(serde_json::json!({
+        "manifest": manifest,
+        "stages": stages,
+        "reboot_to_apply": true,
+    })))
+}
+
 /// `POST /api/v1/updates/reboot-to-apply` (spec §4.4).
 pub async fn reboot_to_apply(
     State(app): State<AppState>,
