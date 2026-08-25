@@ -15,6 +15,7 @@ use crate::engine_bridge::EngineBridge;
 use crate::systemd::SystemdClient;
 use crate::update_backend::UpdateBackend;
 use webconfig_engine::pairing::PairingAgent;
+use webconfig_engine::telemetry::TelemetryQueue;
 
 /// The top-level state shared across the router.
 #[derive(Clone)]
@@ -34,6 +35,9 @@ pub struct AppState {
     pub sse_connections: Arc<tokio::sync::Semaphore>,
     /// HQ pairing agent (task 36): durable state + retry/heartbeat transitions.
     pub pairing: Arc<std::sync::Mutex<PairingAgent>>,
+    /// Durable telemetry/MQTT delivery queue (task 37): offline queue + retry
+    /// + backpressure.
+    pub telemetry: Arc<std::sync::Mutex<TelemetryQueue>>,
 }
 
 impl AppState {

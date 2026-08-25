@@ -48,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
     } = application;
 
     let static_dir = resolve_static_dir();
+    let telemetry = state.telemetry.clone();
     let app = routes::build_router(state, static_dir);
 
     // Commit/confirm rollback timer (spec §4.2 flagship feature).
@@ -59,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
         engine.clone(),
         manifest.clone(),
         alert_engine.clone(),
+        telemetry,
     ));
 
     let webconfig_dir = engine.sysroot.webconfig_dir();

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use webconfig_engine::alert::{merge_defaults, AlertEngine};
 use webconfig_engine::manifest::BoardManifest;
+use webconfig_engine::telemetry::TelemetryQueue;
 
 use crate::alert_dispatch::dispatch_event;
 use crate::bootstrap;
@@ -14,6 +15,7 @@ pub(crate) async fn run_alert_timer(
     engine: EngineBridge,
     manifest: Arc<BoardManifest>,
     alert_engine: Arc<tokio::sync::Mutex<AlertEngine>>,
+    telemetry: Arc<std::sync::Mutex<TelemetryQueue>>,
 ) {
     let history = bootstrap::alert_history(&engine);
     loop {
@@ -80,6 +82,7 @@ pub(crate) async fn run_alert_timer(
                     &config.services.mqtt,
                     rule,
                     &event,
+                    Some(&telemetry),
                 );
             }
         }

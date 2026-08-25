@@ -20,6 +20,7 @@ use webconfig_engine::alert::AlertEvent;
 use webconfig_engine::applier::run_cmd;
 use webconfig_engine::store::alerts::{AlertRule, AlertsConfig};
 use webconfig_engine::store::services::MqttConfig;
+use webconfig_engine::telemetry::TelemetryQueue;
 use webconfig_engine::Sysroot;
 
 /// Build the JSON payload for a webhook/MQTT push (spec §4.7). Includes the
@@ -153,6 +154,7 @@ pub fn dispatch_mqtt(
     event_topic: Option<&str>,
     payload: &str,
     event: &AlertEvent,
+    telemetry: Option<&std::sync::Mutex<TelemetryQueue>>,
 ) {
     if !sysroot.is_real_root() {
         return;
@@ -172,7 +174,15 @@ pub fn dispatch_mqtt(
     };
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     if let Err(e) = run_cmd("mosquitto_pub", &refs) {
-        tracing::warn!(topic = %topic, error = %e, "alert MQTT publish failed");
+        tracing::warn!(topic = %topic, error = %e, "alert MQTT publish failed; queuing for retry");
+        // Task 37: durable offline queue. On broker failure, enqueue the event
+        // so it is retried later (survives outage/restart) instead of being
+        // dropped.
+        if let Some(tq) = telemetry {
+            if let Ok(mut q) = tq.lock() {
+                q.push(topic, payload.to_string());
+            }
+        }
     }
 }
 
@@ -185,6 +195,7 @@ pub fn dispatch_event(
     mqtt_cfg: &MqttConfig,
     rule: &AlertRule,
     event: &AlertEvent,
+    telemetry: Option<&std::sync::Mutex<TelemetryQueue>>,
 ) {
     let wants_webhook = rule.actions.iter().any(|a| a == "webhook");
     let wants_mqtt = rule.actions.iter().any(|a| a == "mqtt");
@@ -202,6 +213,7 @@ pub fn dispatch_event(
             alerts.mqtt_event_topic.as_deref(),
             &payload,
             event,
+            telemetry,
         );
     }
 }
@@ -314,6 +326,7 @@ mod tests {
             &mqtt,
             &rule_with(&["webhook", "mqtt"]),
             &ev(),
+            None,
         );
     }
 
@@ -323,7 +336,7 @@ mod tests {
         let sys = Sysroot::at("/tmp/never-alert-ui");
         let alerts = AlertsConfig::default();
         let mqtt = MqttConfig::default();
-        dispatch_event(&sys, &alerts, &mqtt, &rule_with(&["ui"]), &ev());
+        dispatch_event(&sys, &alerts, &mqtt, &rule_with(&["ui"]), &ev(), None);
         // Asserting only that it returns without error; no staging dir created
         // because wants_webhook/wants_mqtt are both false.
         assert!(!sys.webconfig_dir().join("alert-out").exists());

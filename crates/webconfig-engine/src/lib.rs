@@ -24,6 +24,7 @@ pub mod pairing;
 pub mod schema;
 pub mod store;
 pub mod sysroot;
+pub mod telemetry;
 pub mod update;
 pub mod users;
 

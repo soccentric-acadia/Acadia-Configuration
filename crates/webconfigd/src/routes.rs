@@ -153,6 +153,10 @@ pub fn build_router(state: AppState, static_dir: std::path::PathBuf) -> Router {
             "/monitoring/telemetry",
             get(monitoring::get_telemetry).put(monitoring::put_telemetry),
         )
+        .route(
+            "/monitoring/telemetry/queue",
+            get(monitoring::telemetry_queue),
+        )
         // Logs (§4.6)
         .route("/logs", get(logs::read))
         .route("/logs/sources", get(logs::sources))

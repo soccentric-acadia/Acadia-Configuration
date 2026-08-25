@@ -71,6 +71,9 @@ pub(crate) async fn build(sysroot: Sysroot) -> Application {
         pairing: Arc::new(std::sync::Mutex::new(
             webconfig_engine::pairing::PairingAgent::load(&webconfig_dir),
         )),
+        telemetry: Arc::new(std::sync::Mutex::new(
+            webconfig_engine::telemetry::TelemetryQueue::load(&webconfig_dir),
+        )),
     };
 
     Application {

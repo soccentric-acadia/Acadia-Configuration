@@ -66,3 +66,20 @@ pub async fn put_telemetry(
     audit(&app, &user, "monitoring.telemetry.put", None);
     Ok(Json(cfg.monitoring.telemetry))
 }
+
+/// `GET /api/v1/monitoring/telemetry/queue` — durable delivery queue status
+/// (task 37): pending events, dropped count, backpressure visibility.
+pub async fn telemetry_queue(
+    State(app): State<AppState>,
+    _role: AuthRole,
+) -> ApiResult<Json<serde_json::Value>> {
+    let q = app
+        .telemetry
+        .lock()
+        .map_err(|_| crate::error::ApiError::Conflict("telemetry locked".into()))?;
+    Ok(Json(serde_json::json!({
+        "pending": q.len(),
+        "dropped": q.dropped_count(),
+        "draining": !q.is_empty(),
+    })))
+}
