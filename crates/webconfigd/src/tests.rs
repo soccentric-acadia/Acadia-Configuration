@@ -872,12 +872,10 @@ async fn app_schema_secret_field_never_appears_in_backup_or_diagnostics() {
 }
 
 #[tokio::test]
-async fn cellular_5g_is_an_untyped_placeholder_with_redacted_secrets_in_backup() {
-    // Checkpoint 1.3: cellular_5g has no applier (spec §4.2 defers cellular/
-    // ModemManager to v2) — it's stored as opaque JSON like vlan/bridges/
-    // cellular, round-trips through PUT/GET untouched, and its pin/password
-    // keys are still redacted defensively in the plaintext backup even though
-    // the field is inert.
+async fn cellular_5g_is_rejected_not_stored() {
+    // Task 33: cellular/5G has no applier (spec §4.2 defers cellular/
+    // ModemManager to v2). The production API must REJECT and the UI must hide
+    // the unsupported feature — not silently store settings nothing acts on.
     let (app, _dir) = build_app().await;
     let (cookie, csrf) = boot_admin(&app).await;
 
@@ -887,7 +885,7 @@ async fn cellular_5g_is_an_untyped_placeholder_with_redacted_secrets_in_backup()
         "cellular_5g": { "enabled": true, "modem": "/dev/cdc-wdm0", "pin": PLANTED_SIM_PIN }
     })
     .to_string();
-    let (st, _, put_body) = send(
+    let (st, _, body_out) = send(
         &app,
         "PUT",
         "/api/v1/network",
@@ -896,30 +894,11 @@ async fn cellular_5g_is_an_untyped_placeholder_with_redacted_secrets_in_backup()
         Some(&body),
     )
     .await;
-    assert_eq!(st, StatusCode::OK);
-    // Round-trips untouched through the plain GET/PUT path.
-    let v: serde_json::Value = serde_json::from_str(&put_body).unwrap();
-    assert_eq!(v["cellular_5g"]["modem"], "/dev/cdc-wdm0");
-    assert_eq!(v["cellular_5g"]["pin"], PLANTED_SIM_PIN);
-
-    let (st, _, backup_body) = send(
-        &app,
-        "GET",
-        "/api/v1/updates/backup",
-        Some(&cookie),
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK);
+    // Rejected: 400, and the PIN never reaches storage/response.
+    assert_eq!(st, StatusCode::BAD_REQUEST);
     assert!(
-        !backup_body.contains(PLANTED_SIM_PIN),
-        "plaintext backup leaked the 5G SIM PIN: {backup_body}"
-    );
-    let backup: serde_json::Value = serde_json::from_str(&backup_body).unwrap();
-    assert_eq!(
-        backup["config"]["network"]["cellular_5g"]["pin"],
-        "[redacted]"
+        !body_out.contains(PLANTED_SIM_PIN),
+        "rejected payload leaked the SIM PIN: {body_out}"
     );
 }
 

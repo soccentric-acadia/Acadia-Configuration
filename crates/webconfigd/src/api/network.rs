@@ -85,6 +85,19 @@ pub async fn put(
     Json(req): Json<NetworkConfig>,
 ) -> ApiResult<Json<serde_json::Value>> {
     role.require_admin("network.put")?;
+    // Task 33: cellular/5G is an unimplemented v2 placeholder. Reject it rather
+    // than silently storing settings no applier will ever act on.
+    let fiveg = &req.cellular_5g;
+    let has_cellular =
+        !fiveg.is_null() && !fiveg.as_object().map(|o| o.is_empty()).unwrap_or(false);
+    let has_cell_vec = !req.cellular.is_empty();
+    if has_cellular || has_cell_vec {
+        return Err(ApiError::BadRequest(
+            "cellular/5G configuration is not supported in this release; \
+             the feature is hidden and its settings are rejected (task 33)"
+                .into(),
+        ));
+    }
     let user = username(&session).await;
     let cfg = app.engine.update(move |c| {
         c.network = req.clone();

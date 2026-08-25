@@ -58,15 +58,6 @@ export async function renderNetworkPage(api, store, mode = 'all') {
   const wifiPsk = Field({ label: 'Password', type: 'password', placeholder: 'Network password' });
   const wifiPriority = Field({ label: 'Priority', type: 'number', value: 0, help: 'Higher-priority networks are preferred when several are available.' });
   const wifiHidden = Toggle({ label: 'Hidden network' });
-  const fiveG = config.cellular_5g || {};
-  const fiveGEnabled = Toggle({ label: 'Enable 5G mobile broadband', checked: fiveG.enabled === true });
-  const fiveGAutoConnect = Toggle({ label: 'Connect automatically', checked: fiveG.auto_connect !== false });
-  const fiveGRoaming = Toggle({ label: 'Allow roaming', checked: fiveG.roaming === true });
-  const fiveGModem = Field({ label: 'Modem device', value: fiveG.modem, placeholder: '/dev/cdc-wdm0' });
-  const fiveGApn = Field({ label: 'APN', value: fiveG.apn, placeholder: 'internet' });
-  const fiveGPin = Field({ label: 'SIM PIN', type: 'password', value: fiveG.pin, placeholder: 'Optional' });
-  const fiveGUsername = Field({ label: 'Username', value: fiveG.username });
-  const fiveGPassword = Field({ label: 'Password', type: 'password', value: fiveG.password });
   const scanResults = el('div', { class: 'stack' });
   const savedNetworks = el('div', { class: 'stack' });
 
@@ -120,11 +111,9 @@ export async function renderNetworkPage(api, store, mode = 'all') {
 
   const fiveGCard = Card({
     title: '5G mobile broadband',
-    subtitle: 'Not implemented in this release — settings are saved but have no effect until a ModemManager-backed applier ships (deferred to v2 per spec §4.2).',
+    subtitle: 'Unsupported in this release — this feature is hidden and cannot be configured.',
   },
-    fiveGEnabled.wrap,
-    el('div', { class: 'form-grid' }, fiveGModem.wrap, fiveGApn.wrap, fiveGPin.wrap, fiveGUsername.wrap, fiveGPassword.wrap),
-    el('div', { class: 'toggle-stack' }, fiveGAutoConnect.wrap, fiveGRoaming.wrap));
+    el('p', { class: 'muted' }, 'Cellular/5G configuration is not implemented. It is intentionally hidden and any saved setting is rejected; a ModemManager-backed applier is deferred to a future release.'));
 
   const dns = Field({ label: 'DNS servers (comma)', value: (config.dns_servers || []).join(', ') });
   const confirmWindow = Field({ label: 'Confirm window (s)', type: 'number', value: config.confirm_window_secs || 90 });
