@@ -74,6 +74,7 @@ make run-mock
 make run WEBCONFIG_PORT=8443
 make docker-build
 make docker-build-arm64
+make docker-build-armv7
 make docker-run
 make docker-logs
 make docker-stop
@@ -82,8 +83,14 @@ make docker-stop
 `run-mock` uses a temporary fake sysroot and has no hardware side effects. `run` uses the real
 host `/proc` and `/sys`, real systemd/update backends, persistent `./data`, and port `8443` by
 default; treat it as conditional and suitable only on the intended device or a disposable host.
-`docker-build-arm64` is conditional on Docker/buildx and an ARM64-capable build environment. The
-Docker run target exposes the production container on port 8443 according to `docker/Makefile`.
+`docker-build` builds the native (x86_64) image with the legacy builder.
+`docker-build-arm64` cross-compiles a true aarch64 image (no QEMU emulation): the Docker
+builder stage stays on the host architecture and compiles `aarch64-unknown-linux-gnu` with the
+cross GNU toolchain, then assembles a `linux/arm64` runtime image. Both the Raspberry Pi 5 and
+Zynq MPSoC are aarch64, so `docker-build-arm64` produces the image to deploy to them.
+`docker-build-armv7` does the same for 32-bit `armv7-unknown-linux-gnueabihf` devices. The
+cross targets require Docker buildx. The Docker run target exposes the production container
+on port 8443 according to `docker/Makefile`.
 
 ## 7. Cleanup
 

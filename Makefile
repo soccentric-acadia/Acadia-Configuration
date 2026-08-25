@@ -49,7 +49,7 @@ TARGETS := x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linu
 # drift from the pin.
 RUST_CHANNEL := $(shell grep -m1 '^channel' rust-toolchain.toml | sed -E 's/.*"([^"]*)".*/\1/')
 
-.PHONY: help build release test lint fmt vendor release-artifacts cross run run-mock stop clean check toolchain docker-build docker-run docker-stop docker-logs docker-clean
+.PHONY: help build release test lint fmt vendor release-artifacts cross run run-mock stop clean check toolchain docker-build docker-build-arm64 docker-build-armv7 docker-run docker-stop docker-logs docker-clean
 
 # Bare `make` prints help rather than building, so a stray invocation never
 # kicks off a network install or a build by surprise.
@@ -57,7 +57,7 @@ RUST_CHANNEL := $(shell grep -m1 '^channel' rust-toolchain.toml | sed -E 's/.*"(
 
 help: ## Show this help
 	@echo "SoCcentric WebConfig — available targets:"
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
 build: ## Debug build of the daemon (host target)
@@ -208,28 +208,31 @@ clean: ## Remove target/
 # board manifest in the canonical install layout. See docker/Dockerfile.
 
 ## docker-build — build the production webconfigd image (host arch)
-docker-build:
+docker-build: ## docker-build — build the production webconfigd image (host arch)
 	$(MAKE) -C docker build IMAGE_NAME=$(shell basename $$(pwd) | tr 'A-Z' 'a-z' | sed 's/-configuration/-webconfigd/')
 
-## docker-build-arm64 — cross-build the arm64 webconfigd image
-
-docker-build-arm64:
+## docker-build-arm64 — cross-build the arm64 webconfigd image (Raspberry Pi 5 / Zynq MPSoC)
+docker-build-arm64: ## docker-build-arm64 — cross-build the arm64 webconfigd image (Raspberry Pi 5 / Zynq MPSoC)
 	$(MAKE) -C docker build-arm64 IMAGE_NAME=$(shell basename $$(pwd) | tr 'A-Z' 'a-z' | sed 's/-configuration/-webconfigd/')
 
+## docker-build-armv7 — cross-build the armv7 webconfigd image (32-bit Pi 2/3-class)
+docker-build-armv7: ## docker-build-armv7 — cross-build the armv7 webconfigd image (32-bit Pi 2/3-class)
+	$(MAKE) -C docker build-armv7 IMAGE_NAME=$(shell basename $$(pwd) | tr 'A-Z' 'a-z' | sed 's/-configuration/-webconfigd/')
+
 ## docker-run — run the container (production, port 8443)
-docker-run:
+docker-run: ## docker-run — run the container (production, port 8443)
 	$(MAKE) -C docker run IMAGE_NAME=$(shell basename $$(pwd) | tr 'A-Z' 'a-z' | sed 's/-configuration/-webconfigd/')
 
 ## docker-stop — stop and remove the container
-docker-stop:
+docker-stop: ## docker-stop — stop and remove the container
 	$(MAKE) -C docker stop
 
 ## docker-logs — tail container logs
-docker-logs:
+docker-logs: ## docker-logs — tail container logs
 	$(MAKE) -C docker logs
 
 ## docker-clean — remove the built image
-docker-clean:
+docker-clean: ## docker-clean — remove the built image
 	$(MAKE) -C docker clean IMAGE_NAME=$(shell basename $$(pwd) | tr 'A-Z' 'a-z' | sed 's/-configuration/-webconfigd/')
 
 # Convenience alias: full validation gate (§9 step 6).

@@ -2,67 +2,112 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # SoCcentric WebConfig (webconfigd) — production container image.
 #
-# Builds the on-device configuration daemon for the host architecture and
-# packages it together with the vanilla-JS frontend, JSON schemas and board
-# manifest so a containerized / dev deployment behaves like the Yocto image
-# (`/usr/share/webconfig/static`, `/usr/share/webconfig/schemas`,
-# `<share>/board-manifest.json`).
+# Builds the on-device configuration daemon and packages it together with the
+# vanilla-JS frontend, JSON schemas and board manifest so a containerized / dev
+# deployment behaves like the Yocto image (`/usr/share/webconfig/static`,
+# `/usr/share/webconfig/schemas`, `<share>/board-manifest.json`).
+#
+# ARCHITECTURES
+#   The builder stage is pinned to the *build* platform (`--platform=$BUILDPLATFORM`)
+#   and the runtime stage to the *target* platform (`--platform=$TARGETPLATFORM`).
+#   Cross-compiling for aarch64 (Raspberry Pi 5, Zynq MPSoC) from an x86 host is
+#   therefore a REAL cross-compile: the Rust compilation runs natively on the
+#   host via the aarch64 GNU toolchain — no QEMU emulation anywhere.
+#
+#   `RUST_TARGET` selects the Rust target triple and the matching cross toolchain.
+#   It defaults to the host (x86_64) but is normally driven by docker/Makefile.
+#
+# Build with:
+#   # native host arch
+#   docker build -f docker/Dockerfile -t acadia-webconfigd .
+#
+#   # aarch64 (Raspberry Pi 5 / Zynq MPSoC) — requires buildx
+#   docker buildx build --platform linux/arm64 \
+#       --build-arg RUST_TARGET=aarch64-unknown-linux-gnu \
+#       -t acadia-webconfigd-arm64 .
+#
+#   # armv7 (older Raspberry Pi 2/3-class) — requires buildx
+#   docker buildx build --platform linux/arm/v7 \
+#       --build-arg RUST_TARGET=armv7-unknown-linux-gnueabihf \
+#       -t acadia-webconfigd-armv7 .
+#
+#   docker run --rm -p 8443:8443 -v webconfig-data:/data acadia-webconfigd
 #
 # Uses the exact pinned Rust toolchain (rust-toolchain.toml) for
 # reproducibility. The daemon has NO OpenSSL/DB system deps (rustls + bundled
-# sqlite) so the runtime image stays minimal. Build with:
-#
-#   docker build -f docker/Dockerfile -t acadia-webconfigd .
-#   docker run --rm -p 8443:8443 -v webconfig-data:/data acadia-webconfigd
+# sqlite) so the runtime image stays minimal.
 # ──────────────────────────────────────────────────────────────────────────────
+
+# Predefined buildx args with sane defaults so legacy `docker build` (which does
+# not auto-populate them) still works for the native host case.
+ARG BUILDPLATFORM=linux/amd64
+ARG TARGETPLATFORM=linux/amd64
+# Rust target triple. Host default unless overridden by docker/Makefile.
+ARG RUST_TARGET=x86_64-unknown-linux-gnu
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Stage 1 — builder
-#   Compile webconfigd with the pinned toolchain.
+#   Compile webconfigd with the pinned toolchain, natively on the build
+#   platform, targeting $RUST_TARGET.
 # ──────────────────────────────────────────────────────────────────────────────
-FROM rust:1.97-slim AS builder
+FROM --platform=$BUILDPLATFORM rust:1.97.1-slim AS builder
 
-# apt build helpers (none strictly required beyond the toolchain, but keep a
-# minimal set in case of linker needs).
+ARG RUST_TARGET
+
+# apt build helpers. Only the matching cross GNU toolchain is installed when the
+# target differs from the host; the native build needs just pkg-config/gcc.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       pkg-config \
-      libssl-dev \
       ca-certificates \
       gcc \
+ && case "$RUST_TARGET" in \
+      aarch64-unknown-linux-gnu) \
+        apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross ;; \
+      armv7-unknown-linux-gnueabihf) \
+        apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf libc6-dev-armhf-cross ;; \
+      x86_64-unknown-linux-gnu) : ;; \
+      *) echo "Unsupported RUST_TARGET: $RUST_TARGET" >&2; exit 1 ;; \
+    esac \
  && rm -rf /var/lib/apt/lists/*
+
+# The cross C compiler for the bundled sqlite3 (rusqlite `bundled` feature
+# compiles the C source via the `cc` crate, which keys off CC_<target>).
+ENV CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+    CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc
+
+# The cross linker is declared in .cargo/config.toml, so carry it into the build.
+COPY .cargo ./ .cargo/
 
 WORKDIR /build
 
-# Copy manifest + lock first to leverage the layer cache.
+# Copy manifest + lock + toolchain first to leverage the layer cache.
 COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
 COPY rust-toolchain.toml ./
+COPY crates ./crates
 
 # board-manifests + schemas are embedded at compile time via include_str!(), so
 # they must be present before cargo build runs.
 COPY board-manifests ./board-manifests
 COPY schemas ./schemas
 
-# Compile dependencies (cached layer).
+# Add the cross target (no-op for the native host target).
+RUN rustup target add "$RUST_TARGET"
+
+# Compile (deps cached) and copy the binary out of the cache mount to /out.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo build --release -p webconfigd
+    cargo build --release -p webconfigd --target "$RUST_TARGET" \
+ && mkdir -p /out \
+ && cp "target/$RUST_TARGET/release/webconfigd" /out/webconfigd
 
 # Copy the runtime assets the image serves.
 COPY frontend ./frontend
 
-# Rebuild so the release binary is guaranteed fresh (deps layer is cached), then
-# copy the binary out of the cache mount to a normal path for later stages.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
-    cargo build --release -p webconfigd \
-    && mkdir -p /out \
-    && cp target/release/webconfigd /out/webconfigd
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Stage 2 — runtime
-#   Minimal image containing the daemon, static UI, schemas and manifest.
+#   Minimal image (target arch) containing the daemon, static UI, schemas and
+#   manifest.
 # ──────────────────────────────────────────────────────────────────────────────
 FROM debian:13-slim AS runtime
 
