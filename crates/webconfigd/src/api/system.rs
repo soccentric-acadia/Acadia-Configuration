@@ -148,6 +148,43 @@ pub async fn apply(
     ))
 }
 
+/// `POST /api/v1/system/apply-all` — apply **every** registered applier
+/// (task 39). Returns one result per applier so the operator (and tests) can
+/// prove no applier was skipped, even when one fails. Routes that persist a
+/// setting should use this so a newly registered applier is never silently
+/// left out.
+pub async fn apply_all(
+    State(app): State<AppState>,
+    role: AuthRole,
+    session: Session,
+) -> ApiResult<Json<serde_json::Value>> {
+    role.require_admin("system.apply_all")?;
+    let user = username(&session).await;
+    let results = app.engine.apply_all().await?;
+    let failed = results.iter().filter(|(_, r)| r.is_err()).count();
+    let payload: Vec<serde_json::Value> = results
+        .iter()
+        .map(|(id, r)| {
+            serde_json::json!({
+                "applier": id,
+                "ok": r.is_ok(),
+                "error": r.as_ref().err(),
+            })
+        })
+        .collect();
+    audit(
+        &app,
+        &user,
+        "system.apply_all",
+        Some(format!("appliers={} failed={failed}", results.len())),
+    );
+    Ok(Json(serde_json::json!({
+        "applied": results.len(),
+        "failed": failed,
+        "results": payload,
+    })))
+}
+
 /// `GET /api/v1/system/info` — read-only device info (spec §4.1).
 pub async fn info(State(app): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let m = &app.manifest;

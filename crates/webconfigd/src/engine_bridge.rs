@@ -155,6 +155,38 @@ impl EngineBridge {
         Ok(outcome)
     }
 
+    /// Run **every** registered applier (task 39). Returns one result per
+    /// applier so a caller can prove no applier was skipped, even when one
+    /// fails. This is the canonical "apply all settings" path routes use so a
+    /// newly registered applier cannot be silently left out.
+    pub async fn apply_all(&self) -> ApiResult<Vec<(String, Result<ApplyOutcome, String>)>> {
+        let sys = self.sysroot.clone();
+        let appliers = self.appliers.clone();
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || -> Vec<(String, Result<ApplyOutcome, String>)> {
+            let cfg = match store.load() {
+                Ok(c) => c.config,
+                Err(e) => {
+                    return appliers
+                        .iter()
+                        .map(|a| (a.id().to_string(), Err(e.to_string())))
+                        .collect();
+                }
+            };
+            appliers
+                .iter()
+                .map(|a| {
+                    (
+                        a.id().to_string(),
+                        a.apply(&sys, &cfg).map_err(|e| e.to_string()),
+                    )
+                })
+                .collect()
+        })
+        .await
+        .map_err(|_| ApiError::Internal)
+    }
+
     /// Run `rollback` for one applier on a blocking task (spec §3/§4.2).
     pub async fn rollback(&self, applier_id: &str) -> ApiResult<()> {
         let sys = self.sysroot.clone();

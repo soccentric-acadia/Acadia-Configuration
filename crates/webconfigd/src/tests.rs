@@ -2780,3 +2780,38 @@ async fn updates_backup_upload_is_authenticated_and_completes() {
     // Non-admin must be rejected.
     // (no operator helper here; admin-only is enforced by require_admin)
 }
+
+#[tokio::test]
+async fn system_apply_all_covers_every_registered_applier() {
+    // Task 39: apply-all must return a result per registered applier so no
+    // applier is skipped. On the fake sysroot every applier should be present
+    // in the response (some may report failure against a fake root, but none
+    // may be silently omitted).
+    let (app, _dir) = build_app().await;
+    let (cookie, csrf) = boot_admin(&app).await;
+    let (st, _, body) = send(
+        &app,
+        "POST",
+        "/api/v1/system/apply-all",
+        Some(&cookie),
+        Some(&csrf),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let results = v["results"].as_array().unwrap();
+    // The applier set: hostname time ssh networkd firewall wifi ap can serial
+    // gpio journald wireguard.
+    assert_eq!(
+        results.len(),
+        12,
+        "expected all 12 appliers, got {}",
+        results.len()
+    );
+    // Every result names its applier and an ok flag.
+    for r in results {
+        assert!(r["applier"].is_string());
+        assert!(r["ok"].is_boolean());
+    }
+}

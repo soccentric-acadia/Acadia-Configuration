@@ -60,6 +60,7 @@ pub fn build_router(state: AppState, static_dir: std::path::PathBuf) -> Router {
         // System (§4.1)
         .route("/system", get(system::get).put(system::put))
         .route("/system/apply", post(system::apply))
+        .route("/system/apply-all", post(system::apply_all))
         .route("/system/info", get(system::info))
         .route("/system/reboot", post(system::reboot))
         .route("/system/shutdown", post(system::shutdown))
