@@ -14,6 +14,7 @@ use crate::auth::LoginThrottle;
 use crate::engine_bridge::EngineBridge;
 use crate::systemd::SystemdClient;
 use crate::update_backend::UpdateBackend;
+use webconfig_engine::pairing::PairingAgent;
 
 /// The top-level state shared across the router.
 #[derive(Clone)]
@@ -31,6 +32,8 @@ pub struct AppState {
     /// its own tick) so the current-thread runtime and RAM budget can't be
     /// exhausted by many simultaneous streams.
     pub sse_connections: Arc<tokio::sync::Semaphore>,
+    /// HQ pairing agent (task 36): durable state + retry/heartbeat transitions.
+    pub pairing: Arc<std::sync::Mutex<PairingAgent>>,
 }
 
 impl AppState {

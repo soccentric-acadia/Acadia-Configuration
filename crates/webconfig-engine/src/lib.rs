@@ -20,6 +20,7 @@ pub mod audit;
 pub mod backup;
 pub mod manifest;
 pub mod monitoring;
+pub mod pairing;
 pub mod schema;
 pub mod store;
 pub mod sysroot;

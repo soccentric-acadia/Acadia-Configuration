@@ -68,6 +68,9 @@ pub(crate) async fn build(sysroot: Sysroot) -> Application {
         users_path: database,
         login_throttle: Arc::new(LoginThrottle::new()),
         sse_connections: Arc::new(tokio::sync::Semaphore::new(MAX_SSE_CONNECTIONS)),
+        pairing: Arc::new(std::sync::Mutex::new(
+            webconfig_engine::pairing::PairingAgent::load(&webconfig_dir),
+        )),
     };
 
     Application {

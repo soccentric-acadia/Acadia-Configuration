@@ -130,6 +130,9 @@ async fn build_app_full(
         sse_connections: Arc::new(tokio::sync::Semaphore::new(
             crate::bootstrap::MAX_SSE_CONNECTIONS,
         )),
+        pairing: Arc::new(std::sync::Mutex::new(
+            webconfig_engine::pairing::PairingAgent::load(&webconfig_dir),
+        )),
     };
 
     // Static dir: a tempdir is fine; API routes don't depend on it.
@@ -2671,4 +2674,62 @@ async fn services_verbs_report_real_failure_not_fake_ok() {
         failed_count, 4,
         "expected all 4 services.* audit entries to record failure: {text}"
     );
+}
+
+#[tokio::test]
+async fn pairing_provision_heartbeat_and_rotate() {
+    // Task 36: a provisioned image can enroll, survive heartbeat, and a
+    // rotation revokes the credential — end-to-end through the API.
+    let (app, _dir) = build_app().await;
+    let (cookie, csrf) = boot_admin(&app).await;
+
+    let (st, _, body) = send(&app, "GET", "/api/v1/pairing", Some(&cookie), None, None).await;
+    assert_eq!(st, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["state"], "Unprovisioned");
+
+    let prov =
+        serde_json::json!({"token":"tok123","hq_endpoint":"https://hq.example","ttl_secs":600})
+            .to_string();
+    let (st, _, body) = send(
+        &app,
+        "POST",
+        "/api/v1/pairing/provision",
+        Some(&cookie),
+        Some(&csrf),
+        Some(&prov),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["state"], "pending");
+
+    let (st, _, _body) = send(
+        &app,
+        "POST",
+        "/api/v1/pairing/heartbeat",
+        Some(&cookie),
+        Some(&csrf),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    let (_st, _, body) = send(&app, "GET", "/api/v1/pairing", Some(&cookie), None, None).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["state"], "Enrolled");
+
+    let (st, _, _) = send(
+        &app,
+        "POST",
+        "/api/v1/pairing/rotate",
+        Some(&cookie),
+        Some(&csrf),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (_st, _, body) = send(&app, "GET", "/api/v1/pairing", Some(&cookie), None, None).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["state"], "Revoked");
 }
