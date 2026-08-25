@@ -111,6 +111,24 @@ lint: ## clippy -D warnings + rustfmt --check
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
 	$(CARGO) fmt --all -- --check
 
+lint-toolchain: ## Assert one pinned Rust toolchain across rust-toolchain.toml, GH Actions, GitLab (task 30)
+	@set -e; \
+	echo "Checking Rust toolchain consistency..."; \
+	PINNED=$$(sed -n 's/^channel = "\([0-9.]*\)"/\1/p' rust-toolchain.toml | head -1); \
+	[ -n "$$PINNED" ] || { echo "FAIL: no channel in rust-toolchain.toml"; exit 1; }; \
+	echo "  pinned channel: $$PINNED"; \
+	if ! grep -q "toolchain: \"$$PINNED\"" .github/workflows/ci.yml; then \
+		echo "FAIL: GH Actions does not pin $$PINNED (see .github/workflows/ci.yml)"; exit 1; \
+	fi; \
+	if ! grep -q "rust:$$PINNED" .gitlab-ci.yml; then \
+		echo "FAIL: GitLab CI does not pin rust:$$PINNED"; exit 1; \
+	fi; \
+	actual=$$(rustc --version | awk '{print $$2}'); \
+	if [ "$$actual" != "$$PINNED" ]; then \
+		echo "WARN: local rustc is $$actual, pinned is $$PINNED"; \
+	fi; \
+	echo "  OK: one pinned toolchain $$PINNED everywhere"
+
 fmt: ## Format the workspace in place
 	$(CARGO) fmt --all
 

@@ -66,4 +66,7 @@ assert "OS image installs webconfig packages" \
 # Task 28: real immutable release checksums, no placeholders.
 assert "release checksums are real (no placeholders)" 'make lint-checksums'
 
+# Task 30: one pinned Rust toolchain across local + all CI pipelines.
+assert "one pinned Rust toolchain everywhere" 'make lint-toolchain'
+
 report "$TIER"
