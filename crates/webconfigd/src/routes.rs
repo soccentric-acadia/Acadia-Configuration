@@ -134,6 +134,10 @@ pub fn build_router(state: AppState, static_dir: std::path::PathBuf) -> Router {
         )
         .route("/updates/backup/check", get(updates::backup_check))
         .route(
+            "/updates/backup/upload",
+            post(updates::backup_upload).layer(RequestBodyLimitLayer::new(BACKUP_SECRET_LIMIT)),
+        )
+        .route(
             "/updates/backup",
             get(updates::backup)
                 .post(updates::backup_encrypted)

@@ -622,6 +622,9 @@ pub mod updates {
         pub backup_enabled: bool,
         #[serde(default = "default_feature_enabled")]
         pub restore_enabled: bool,
+        /// Optional bearer token for authenticated remote backup upload (task 38).
+        #[serde(default, skip_serializing)]
+        pub token: Option<String>,
     }
 
     fn default_feature_enabled() -> bool {
