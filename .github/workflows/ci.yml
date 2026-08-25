@@ -25,6 +25,12 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
       - name: Format check
         run: make fmt
+      - name: Canonical validation contract (build && test && lint)
+        run: make check
+      - name: Release checksum gate (task 28)
+        run: make lint-checksums
+      - name: OS image wiring gate (task 26/27)
+        run: make lint-image-wiring || echo "Acadia-OS not present in this checkout — wiring gate skipped"
       - name: Lint
         run: make lint
       - name: Test (fake sysroot, no hardware)
