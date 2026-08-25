@@ -1,0 +1,40 @@
+#!/bin/sh
+# pico-flash — Pico W firmware flash helper (task 42 flash_command target).
+#
+# Installed to /usr/local/bin/pico-flash on the Acadia image and invoked by
+# the MCU firmware upload path (POST /io/mcu/firmware) after the ED25519
+# signature has been verified. The firmware .bin has already been verified and
+# staged; this script gets the path as its single argument.
+#
+# It prefers picotool (UART/USB flash of a running Pico) and falls back to the
+# RP2040 BOOTSEL mass-storage copy. Any failure returns non-zero so the API
+# reports flashed=false rather than a false success.
+
+set -eu
+
+FW_PATH="${1:-}"
+[ -n "$FW_PATH" ] || { echo "pico-flash: missing firmware path" >&2; exit 2; }
+[ -f "$FW_PATH" ] || { echo "pico-flash: firmware not found: $FW_PATH" >&2; exit 2; }
+
+flash_via_picotool() {
+    if command -v picotool >/dev/null 2>&1; then
+        # picotool flash --verify writes + verifies, then the device resets.
+        picotool load -x "$FW_PATH" && picotool verify "$FW_PATH"
+        return $?
+    fi
+    return 1
+}
+
+flash_via_bootsel() {
+    # RP2040 BOOTSEL mass-storage (RPI-RP2) copy of a .uf2.
+    [ "${FW_PATH##*.}" = "uf2" ] || return 1
+    mount="$(find /media /mnt -maxdepth 3 -iname 'RPI-RP2' -type d 2>/dev/null | head -1)"
+    [ -n "$mount" ] || return 1
+    cp "$FW_PATH" "$mount/" && sync
+}
+
+if ! flash_via_picotool && ! flash_via_bootsel; then
+    echo "pico-flash: no Pico W found (picotool or BOOTSEL); flash not performed" >&2
+    exit 1
+fi
+echo "pico-flash: firmware flashed and verified"

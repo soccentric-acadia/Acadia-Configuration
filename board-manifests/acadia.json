@@ -86,6 +86,7 @@
         "signed_fw": true,
         "settings_schema": "app:mcu-stm32",
         "firmware_pubkey_ed25519": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "flash_command": "/usr/local/bin/pico-flash",
         "_firmware_pubkey_note": "ED25519 public trust anchor for Pico W firmware signing (task 41). The matching private key is controlled by the hardware secret store and is NEVER committed; this hex is the public verification key the MCU flash path verifies against. Rotate via the firmware release workflow, not by editing this file alone."
       }
     },

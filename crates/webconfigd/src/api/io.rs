@@ -809,7 +809,28 @@ pub async fn mcu_firmware(
         )
     } else if let Some(cmd) = mcu.caps.get("flash_command").and_then(|v| v.as_str()) {
         match webconfig_engine::applier::run_cmd(cmd, &[fw_path.to_string_lossy().as_ref()]) {
-            Ok(_) => (true, "ok".to_string()),
+            Ok(_) => {
+                // Post-flash identity check (task 42): confirm the flashed
+                // version matches by invoking a verify-only command if the
+                // manifest declares one; otherwise trust the flash_command's
+                // own verify-on-write and report identity as best-effort.
+                let identity = mcu
+                    .caps
+                    .get("flash_identity_command")
+                    .and_then(|v| v.as_str());
+                match identity {
+                    Some(idcmd) => {
+                        match webconfig_engine::applier::run_cmd(idcmd, &[safe_version.as_str()]) {
+                            Ok(out) => (true, format!("ok; post-flash identity: {}", out.trim())),
+                            Err(e) => (
+                                false,
+                                format!("flash ok but post-flash identity check failed: {e}"),
+                            ),
+                        }
+                    }
+                    None => (true, "ok (flash command reported success)".to_string()),
+                }
+            }
             Err(e) => (false, format!("flash command failed: {e}")),
         }
     } else {

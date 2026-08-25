@@ -23,6 +23,7 @@ SRC_URI = " \
     file://webconfigd.service \
     file://webconfigd.env \
     file://50-webconfigd.polkit.rules \
+    file://pico-flash \
 "
 # SHA-256 of the source + vendored tarballs, for the SPDX/SBOM and
 # supply-chain audit (global §1: reproducible builds, pinned versions).
@@ -76,6 +77,10 @@ do_install:append() {
     install -d ${D}${datadir}/polkit-1/rules.d
     install -m 0644 ${WORKDIR}/50-webconfigd.polkit.rules \
         ${D}${datadir}/polkit-1/rules.d/50-webconfigd.rules
+
+    # Pico W firmware flash helper (task 42 flash_command target).
+    install -d ${D}/usr/local/bin
+    install -m 0755 ${WORKDIR}/pico-flash ${D}/usr/local/bin/pico-flash
 }
 
 SYSTEMD_SERVICE:${PN} = "webconfigd.service"
