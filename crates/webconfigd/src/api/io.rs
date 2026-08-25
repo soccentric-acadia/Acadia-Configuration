@@ -441,6 +441,44 @@ mod tests {
         assert_eq!(parse_gpio_device("gpiochip1 offset 7"), None);
         assert_eq!(parse_gpio_device(""), None);
     }
+
+    #[test]
+    fn manifest_firmware_pubkey_is_a_real_ed25519_trust_anchor() {
+        // Task 41: the board manifest must carry a real ED25519 public key
+        // (not the PLACEHOLDER), and a signature produced by the matching key
+        // must verify against it. Guards against the anchor being reverted to
+        // a placeholder or an invalid hex value.
+        let raw = std::fs::read_to_string(format!(
+            "{}/../../board-manifests/acadia.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("board-manifests/acadia.json present");
+        let manifest: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let caps = &manifest["peripherals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "mcu-pico")
+            .expect("mcu-pico peripheral")["caps"];
+        let pubhex = caps["firmware_pubkey_ed25519"].as_str().unwrap();
+        assert_ne!(
+            pubhex, "PLACEHOLDER",
+            "trust anchor must not be a placeholder"
+        );
+        let pubkey = hex::decode(pubhex).unwrap();
+        assert_eq!(pubkey.len(), 32, "ED25519 public keys are 32 bytes");
+
+        // Verify a signature from the matching private key (dev fixture).
+        let payload: &[u8] = b"acadia-mcu-fw-test-signature";
+        let sig = hex::decode("19c86e2a0c8971157d8402e9eafd02efd8e803360d4a396fa1bc473244615792521b9c4ff9604916dac3dc2181a90512159956c65431fe04a32fe708cb05750e")
+            .unwrap();
+        let vk = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &pubkey);
+        assert!(
+            vk.verify(payload, &sig).is_ok(),
+            "dev signature must verify against the anchor"
+        );
+        assert!(vk.verify(b"tampered", &sig).is_err());
+    }
 }
 
 /// `PUT /api/v1/io` — update serial/CAN/GPIO/MCU config (admin only).

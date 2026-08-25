@@ -32,6 +32,23 @@ if missing:
     sys.exit(1)
 PY'
 
+check "MCU firmware trust anchor is a real key (task 41)" "python3" \
+  'python3 - <<PY
+import json, sys
+m = json.load(open("board-manifests/acadia.json"))
+for p in m.get("peripherals", []):
+    if p.get("kind") == "mcu":
+        key = p.get("caps", {}).get("firmware_pubkey_ed25519", "")
+        if key in ("", "PLACEHOLDER"):
+            print("MCU firmware_pubkey_ed25519 is still a placeholder"); sys.exit(1)
+        try:
+            if len(bytes.fromhex(key)) != 32:
+                print("MCU trust anchor is not 32-byte ED25519"); sys.exit(1)
+        except ValueError:
+            print("MCU trust anchor is not valid hex"); sys.exit(1)
+print("OK: MCU firmware trust anchor is a real 32-byte key")
+PY'
+
 check "JSON schemas parse" "python3" \
   'for f in schemas/*.json; do
      python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$f" \
