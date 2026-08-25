@@ -69,4 +69,9 @@ assert "release checksums are real (no placeholders)" 'make lint-checksums'
 # Task 30: one pinned Rust toolchain across local + all CI pipelines.
 assert "one pinned Rust toolchain everywhere" 'make lint-toolchain'
 
+# Task 31: systemd-networkd owns networking (contract doc/network-manager-contract.md).
+assert "networkd applier targets /etc/systemd/network (systemd-networkd)" \
+  'grep -q "/etc/systemd/network" crates/webconfig-engine/src/appliers/networkd.rs \
+     || { echo "networkd applier must target /etc/systemd/network (systemd-networkd contract)"; exit 1; }'
+
 report "$TIER"
