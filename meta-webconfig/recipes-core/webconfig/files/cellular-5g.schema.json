@@ -1,0 +1,117 @@
+{
+  "id": "app:cellular-5g",
+  "schema_version": "1.0.0",
+  "title": "5G / LTE cellular modem profile (v2 design-only)",
+  "description": "Versioned cellular schema. The feature is not implemented in this release (task 33 rejects it); this schema captures the validated contract — modem, APN, PIN, authentication, carrier profile, and secret handling — so a future ModemManager applier has a versioned target.",
+  "groups": [
+    {
+      "id": "connection",
+      "title": "Connection",
+      "fields": [
+        {
+          "id": "enabled",
+          "title": "Enable cellular data",
+          "field_type": "bool"
+        },
+        {
+          "id": "modem_device",
+          "title": "Modem device",
+          "field_type": "string",
+          "required": true,
+          "validation": { "pattern": "^/dev/[a-zA-Z0-9_-]+$" },
+          "help": "e.g. /dev/cdc-wdm0"
+        },
+        {
+          "id": "auto_connect",
+          "title": "Auto-connect",
+          "field_type": "bool"
+        },
+        {
+          "id": "roaming",
+          "title": "Allow roaming",
+          "field_type": "bool"
+        }
+      ]
+    },
+    {
+      "id": "carrier",
+      "title": "Carrier profile",
+      "fields": [
+        {
+          "id": "apn",
+          "title": "APN",
+          "field_type": "string",
+          "required": true,
+          "validation": { "min_len": 1, "max_len": 64, "pattern": "^[a-zA-Z0-9.-]+$" },
+          "help": "Access Point Name (e.g. internet)"
+        },
+        {
+          "id": "carrier_profile",
+          "title": "Carrier profile ID",
+          "field_type": "string",
+          "validation": { "max_len": 64 }
+        },
+        {
+          "id": "auth_method",
+          "title": "Authentication",
+          "field_type": "enum",
+          "options": [
+            { "value": "none", "label": "None" },
+            { "value": "pap", "label": "PAP" },
+            { "value": "chap", "label": "CHAP" },
+            { "value": "pap_chap", "label": "PAP/CHAP" }
+          ]
+        },
+        {
+          "id": "username",
+          "title": "Username",
+          "field_type": "string",
+          "validation": { "max_len": 128 }
+        },
+        {
+          "id": "password",
+          "title": "Password",
+          "field_type": "secret",
+          "validation": { "max_len": 128 },
+          "help": "Stored on-device only; never returned in backups or responses."
+        }
+      ]
+    },
+    {
+      "id": "sim",
+      "title": "SIM",
+      "fields": [
+        {
+          "id": "pin",
+          "title": "SIM PIN",
+          "field_type": "secret",
+          "validation": { "pattern": "^[0-9]{4,8}$" },
+          "help": "Stored on-device only; never returned in backups or responses."
+        },
+        {
+          "id": "pin_enabled",
+          "title": "PIN required",
+          "field_type": "bool"
+        }
+      ]
+    }
+  ],
+  "validate": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "modem_device": { "type": "string", "pattern": "^/dev/[a-zA-Z0-9_-]+$" },
+      "auto_connect": { "type": "boolean" },
+      "roaming": { "type": "boolean" },
+      "apn": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9.-]+$" },
+      "carrier_profile": { "type": "string", "maxLength": 64 },
+      "auth_method": { "type": "string", "enum": ["none", "pap", "chap", "pap_chap"] },
+      "username": { "type": "string", "maxLength": 128 },
+      "password": { "type": "string", "maxLength": 128 },
+      "pin": { "type": "string", "pattern": "^[0-9]{4,8}$" },
+      "pin_enabled": { "type": "boolean" }
+    },
+    "required": ["modem_device", "apn"]
+  }
+}

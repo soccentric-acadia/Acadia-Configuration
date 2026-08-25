@@ -38,6 +38,24 @@ check "JSON schemas parse" "python3" \
        || { echo "invalid JSON: $f"; exit 1; }
    done'
 
+# Task 34: cellular schema is versioned and declares the modem/APN/PIN/auth/
+# secret contract.
+check "cellular-5g schema is versioned" "python3" \
+  'python3 - <<PY
+import json, sys
+try:
+    d = json.load(open("schemas/cellular-5g.schema.json"))
+except FileNotFoundError:
+    print("schemas/cellular-5g.schema.json missing"); sys.exit(1)
+if not d.get("schema_version"):
+    print("cellular-5g schema must declare schema_version"); sys.exit(1)
+field_ids = {f["id"] for g in d["groups"] for f in g["fields"]}
+for key in ("modem_device", "apn", "auth_method", "pin"):
+    if key not in field_ids:
+        print(f"cellular-5g schema missing field {key}"); sys.exit(1)
+print("OK: cellular-5g schema versioned:", d["schema_version"])
+PY'
+
 assert "meta-webconfig layer.conf present for the OS build" \
   'test -f meta-webconfig/conf/layer.conf'
 
