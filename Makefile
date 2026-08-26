@@ -13,7 +13,9 @@
 #   make lint       — clippy + rustfmt --check
 #   make fmt        — format in place
 #   make vendor     — (re)generate the vendored offline crate tarball
-#   make cross      — build all three cross-targets (CI parity)
+#   make cross      — build all three cross-targets (CI parity; uses
+#                     cargo-zigbuild automatically if the GNU cross
+#                     toolchain isn't installed)
 #   make run        — run the daemon against the real host (live /proc, real
 #                     backends); persistent state in ./data (dev)
 #   make run-mock   — run against a tempdir fake sysroot (mock backends, no HW)
@@ -144,10 +146,35 @@ release-artifacts: ## Package release tarballs + compute real checksums for webc
 	@./tools/release-artifacts.sh
 
 # Cross-compile parity check for CI (spec §6).
+#
+# CI installs the GNU cross toolchains (gcc-aarch64-linux-gnu, gcc-arm-linux-gnueabihf)
+# and the committed .cargo/config.toml points the linker at them. A local developer
+# usually has neither, but the machine's alternate cross toolchain — cargo-zigbuild
+# plus a zig compiler — produces the same result without any system gcc cross
+# packages. Use GNU when present (true CI parity), otherwise fall back to zigbuild.
 cross: ## Build all three cross-targets (x86_64/aarch64/armv7), CI parity
-	@for t in $(TARGETS); do \
+	@set -e; \
+	if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then \
+		echo "==> cross-compiling with GNU toolchain (CI parity)"; \
+		CMD="$(CARGO) build --workspace --release --target"; \
+	elif command -v cargo-zigbuild >/dev/null 2>&1; then \
+		ZIG="$$(command -v zig 2>/dev/null || true)"; \
+		if [ -z "$$ZIG" ] && [ -x "$$HOME/zig/zig" ]; then ZIG="$$HOME/zig/zig"; fi; \
+		if [ -n "$$ZIG" ]; then \
+			echo "==> GNU cross toolchain not found; using cargo-zigbuild (zig: $$ZIG)"; \
+			export PATH="$$(dirname "$$ZIG"):$$PATH"; \
+			CMD="$(CARGO) zigbuild --workspace --release --target"; \
+		else \
+			echo "ERROR: cargo-zigbuild present but no zig compiler on PATH or ~/zig/zig." >&2; \
+			exit 1; \
+		fi; \
+	else \
+		echo "ERROR: no cross toolchain. Install GNU cross gcc (gcc-aarch64-linux-gnu, gcc-arm-linux-gnueabihf) OR cargo-zigbuild + zig." >&2; \
+		exit 1; \
+	fi; \
+	for t in $(TARGETS); do \
 		echo "==> building $$t"; \
-		$(CARGO) build --workspace --release --target $$t || exit 1; \
+		$$CMD $$t || exit 1; \
 	done
 
 # Dev run against the REAL host sysroot (spec §6): no WEBCONFIG_SYSROOT is
