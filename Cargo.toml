@@ -19,10 +19,15 @@ members = [
 
 # Pinned to keep the vendored offline tarball (spec §2) reproducible and to
 # guarantee all three cross-targets (aarch64, armv7, x86_64) build consistently.
+#
+# rust-version is the real floor the locked dependency tree needs (icu_*/idna_adapter
+# 1.2.2 compile at 1.86; time was pinned to 0.3.44 / MSRV 1.81 so the tree stays
+# under the Yocto Scarthgap rust-mixin toolchain, which ships 1.87). The CI and
+# rust-toolchain.toml pin (1.97.1) is higher and covers it.
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.86"
 # Proprietary/closed (matches README.md and every meta-webconfig/*.bb recipe's
 # LICENSE = "CLOSED") — this repo is SoCcentric internal IV&V tooling, not
 # open source. `license-file` (not `license`, which expects an SPDX

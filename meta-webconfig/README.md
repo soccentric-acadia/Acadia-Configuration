@@ -16,6 +16,32 @@ layer — upstream Yocto/BSP layers are never patched.**
 | `webconfig-schemas` | `/usr/share/webconfig/schemas/*.schema.json` | Schema-driven rendering + validation (spec §3). |
 | `webconfig-manifest` | `/usr/share/webconfig/board-manifest.json` | Acadia board manifest (spec §3 platform layer). |
 
+## Yocto / Scarthgap toolchain requirement
+
+The `webconfigd` Rust daemon needs a **rustc >= 1.86** (its Cargo.lock is v4
+format and the locked tree uses edition-2024 crates such as `icu_*`/`idna_adapter`).
+Yocto **Scarthgap (5.0)** ships **Rust 1.75.0** by default, which cannot build it.
+
+To build on Scarthgap, add the official `meta-lts-mixins` **`scarthgap/rust`**
+mixin layer — it backports a current Rust toolchain (currently **1.87.0**) from
+oe-core master and overrides oe-core's `cargo.bbclass`/`rust` recipes. Its layer
+collection name is `scarthgap-rust-mixin`; `conf/layer.conf` already declares the
+`LAYERDEPENDS` on it.
+
+```
+# bblayers.conf
+BBLAYERS += "${TOPDIR}/../meta-lts-mixins/rust"
+```
+
+```git
+# meta-lts-mixins, branch scarthgap/rust
+https://github.com/nedap/meta-lts-mixins (branch scarthgap/rust)
+```
+
+Newer Yocto releases (styhead/walnutar) that already ship rustc >= 1.86 need no
+extra layer; if their oe-core rust is still older than 1.86, add their
+corresponding rust mixin the same way.
+
 ## Adding to an image
 
 ```bitbake

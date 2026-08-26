@@ -10,6 +10,14 @@
 # 50-webconfigd.polkit.rules). Assumption (per spec §7, one line): we use
 # oe-core's `cargo.bbclass` with `CARGO_SRC_DIR` pointing at the workspace
 # root and a vendored tarball fetched by a :npv-swipe fetcher.
+#
+# RUST TOOLCHAIN REQUIREMENT (Scarthgap): oe-core Scarthgap ships rust 1.75.0,
+# too old for this dependency tree (Cargo.lock v4; edition-2024 crates needing
+# rustc >= 1.86). Build against the `meta-lts-mixins` scarthgap/rust layer, which
+# overrides the cargo/rust recipes with 1.87 (collection `scarthgap-rust-mixin`,
+# wired up in conf/layer.conf). Regenerate the vendored tarball (`make vendor`)
+# from the committed Cargo.lock before each release cut so the offline build
+# matches it.
 
 SUMMARY = "SoCcentric on-device web configuration daemon"
 DESCRIPTION = "Browser-based device configuration UI for embedded Linux; one Rust daemon, TLS, no database."
