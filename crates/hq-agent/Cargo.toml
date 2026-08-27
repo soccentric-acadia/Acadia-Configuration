@@ -1,0 +1,26 @@
+[package]
+name = "hq-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Device-side Acadia-HQ AgentLink gRPC client: pairing handshake, heartbeats, backoff reconnect loop, and command dispatch (X5-001..005)."
+
+[dependencies]
+webconfig-engine = { path = "../webconfig-engine" }
+tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
+prost = { version = "0.13", default-features = false, features = ["std", "derive"] }
+tokio = { workspace = true }
+tokio-stream = { version = "0.1", default-features = false, features = ["time"] }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+http = "1"
+
+[build-dependencies]
+tonic-build = { version = "0.12", default-features = false, features = ["transport", "prost"] }
+
+[dev-dependencies]
+tempfile = "3"

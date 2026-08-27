@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 webconfig-engine = { path = "../webconfig-engine" }
+hq-agent = { path = "../hq-agent" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }

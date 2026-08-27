@@ -50,6 +50,10 @@ pub struct PairingRecord {
     /// Retry counter + next-backoff deadline for the retry loop.
     pub retry_count: u64,
     pub retry_after_unix: Option<u64>,
+    /// Permanent device identity (UUID) assigned by HQ at enrollment
+    /// (X5-001: needed for Heartbeat.device_id on every frame).
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 /// A rejected/revoked outcome carries a reason; a success carries the new state.
@@ -78,6 +82,7 @@ impl Default for PairingRecord {
             last_heartbeat_at: None,
             retry_count: 0,
             retry_after_unix: None,
+            device_id: None,
         }
     }
 }
@@ -114,6 +119,28 @@ impl PairingAgent {
     }
     pub fn hq_endpoint(&self) -> &str {
         &self.record.hq_endpoint
+    }
+
+    /// The active pairing token or long-lived credential (may be None when
+    /// unprovisioned).
+    pub fn credential(&self) -> Option<&str> {
+        self.record.credential_token.as_deref()
+    }
+
+    /// Store the permanent device identity assigned by HQ at enrollment.
+    pub fn set_device_id(&mut self, device_id: String) {
+        self.record.device_id = Some(device_id);
+        self.persist();
+    }
+    pub fn device_id(&self) -> Option<&str> {
+        self.record.device_id.as_deref()
+    }
+
+    /// Store the long-lived credential issued by HQ at enrollment
+    /// (X5-001: replaces the single-use pairing token on the next connect).
+    pub fn set_credential(&mut self, credential: String) {
+        self.record.credential_token = Some(credential);
+        self.persist();
     }
 
     /// Provision with a fresh pairing token + HQ endpoint (enrollment start).

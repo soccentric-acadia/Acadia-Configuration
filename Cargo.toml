@@ -13,6 +13,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/hq-agent",
     "crates/webconfig-engine",
     "crates/webconfigd",
 ]

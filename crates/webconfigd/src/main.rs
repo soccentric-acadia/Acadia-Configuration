@@ -49,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
 
     let static_dir = resolve_static_dir();
     let telemetry = state.telemetry.clone();
+    let pairing = state.pairing.clone();
     let app = routes::build_router(state, static_dir);
 
     // Commit/confirm rollback timer (spec §4.2 flagship feature).
@@ -62,6 +63,24 @@ async fn main() -> anyhow::Result<()> {
         alert_engine.clone(),
         telemetry,
     ));
+
+    // HQ AgentLink client (X5-001..005): pairing handshake, heartbeats with
+    // bounded backoff, command acks. Idle (5s poll) until the operator
+    // provisions a pairing token via the web UI; a revoked credential parks
+    // the agent until re-provisioning. Runs on this daemon's runtime — no
+    // extra process (spec §2: exactly one daemon).
+    let (agent_stop, agent_stop_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(hq_agent::run_agent(
+        pairing,
+        hq_agent::GrpcConnector::default(),
+        hq_agent::NullCommandHandler,
+        agent_stop_rx,
+    ));
+    // Ensure the loop stops cleanly when main exits (process death covers the
+    // daemon case; the watch is for tests and future graceful shutdown).
+    tokio::spawn(async move {
+        let _ = agent_stop; // held for the process lifetime
+    });
 
     let webconfig_dir = engine.sysroot.webconfig_dir();
     server::serve(app, engine, &webconfig_dir, &manifest).await
