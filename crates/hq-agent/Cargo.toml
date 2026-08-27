@@ -24,3 +24,4 @@ tonic-build = { version = "0.12", default-features = false, features = ["transpo
 
 [dev-dependencies]
 tempfile = "3"
+tracing-subscriber = { workspace = true }

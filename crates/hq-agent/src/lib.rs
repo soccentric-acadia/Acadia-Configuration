@@ -272,24 +272,41 @@ fn to_agent_error(status: tonic::Status) -> AgentError {
 
 /// One live gRPC bidi stream. The request-half sender is held for the
 /// session's lifetime so the gateway keeps receiving our frames.
+///
+/// X5-012 deadlock note: tonic's `Grpc::streaming` future only resolves once
+/// the server sends response headers, and this gateway sends headers lazily
+/// — AFTER the first client frame. So the streaming call is spawned and the
+/// receive half is handed back via a oneshot, while `send()` queues frames
+/// immediately (the h2 connection task flushes them as the stream opens).
 pub struct GrpcSession {
-    // `tx` must outlive the response stream: dropping it closes the request
-    // half and the gateway ends the session.
-    _tx: mpsc::Sender<pb::AgentFrame>,
-    rx: tonic::codec::Streaming<pb::ServerFrame>,
+    tx: mpsc::Sender<pb::AgentFrame>,
+    ready: Option<
+        tokio::sync::oneshot::Receiver<
+            Result<tonic::codec::Streaming<pb::ServerFrame>, AgentError>,
+        >,
+    >,
+    rx: Option<tonic::codec::Streaming<pb::ServerFrame>>,
 }
 
 #[async_trait::async_trait]
 impl AgentSession for GrpcSession {
     async fn send(&mut self, frame: pb::AgentFrame) -> Result<(), AgentError> {
-        self._tx
+        self.tx
             .send(frame)
             .await
             .map_err(|_| AgentError::Send("request stream closed".into()))
     }
 
     async fn next_frame(&mut self) -> Option<Result<pb::ServerFrame, AgentError>> {
-        match self.rx.message().await {
+        if self.rx.is_none() {
+            let ready = self.ready.take()?;
+            match ready.await {
+                Ok(Ok(streaming)) => self.rx = Some(streaming),
+                Ok(Err(e)) => return Some(Err(e)),
+                Err(_) => return Some(Err(AgentError::Connect("stream task dropped".into()))),
+            }
+        }
+        match self.rx.as_mut().unwrap().message().await {
             Ok(Some(f)) => Some(Ok(f)),
             Ok(None) => None,
             Err(status) => Some(Err(to_agent_error(status))),
@@ -314,28 +331,41 @@ impl AgentConnector for GrpcConnector {
         // ReceiverStream bridges tokio's channel to the futures Stream the
         // gRPC codec expects.
         let (tx, rx) = mpsc::channel::<pb::AgentFrame>(16);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
-        let mut grpc = tonic::client::Grpc::new(channel);
-        grpc.ready()
-            .await
-            .map_err(|e| AgentError::Connect(e.to_string()))?;
-        let path = http::uri::PathAndQuery::from_static("/acadiahq.agent.AgentLink/Connect");
-        let request = tonic::Request::new(tokio_stream::wrappers::ReceiverStream::new(rx));
-        let response: tonic::Response<tonic::codec::Streaming<pb::ServerFrame>> = grpc
-            .streaming(
-                request,
-                path,
-                tonic::codec::ProstCodec::<pb::AgentFrame, pb::ServerFrame>::default(),
-            )
-            .await
-            .map_err(to_agent_error)?;
+        tokio::spawn(async move {
+            let mut grpc = tonic::client::Grpc::new(channel);
+            if let Err(e) = grpc.ready().await {
+                let _ = ready_tx.send(Err(AgentError::Connect(e.to_string())));
+                return;
+            }
+            let path = http::uri::PathAndQuery::from_static("/acadiahq.agent.AgentLink/Connect");
+            let request = tonic::Request::new(tokio_stream::wrappers::ReceiverStream::new(rx));
+            let response: tonic::Response<tonic::codec::Streaming<pb::ServerFrame>> = match grpc
+                .streaming(
+                    request,
+                    path,
+                    tonic::codec::ProstCodec::<pb::AgentFrame, pb::ServerFrame>::default(),
+                )
+                .await
+            {
+                Ok(r) => r,
+                Err(status) => {
+                    let _ = ready_tx.send(Err(to_agent_error(status)));
+                    return;
+                }
+            };
+            let _ = ready_tx.send(Ok(response.into_inner()));
+        });
 
         Ok(Box::new(GrpcSession {
-            _tx: tx,
-            rx: response.into_inner(),
+            tx,
+            ready: Some(ready_rx),
+            rx: None,
         }))
     }
 }
+
 /// Run the connect/heartbeat/retry loop until `shutdown` fires. Never returns
 /// early on transport errors — every failure goes through the pairing agent's
 /// bounded backoff and the loop reconnects.
@@ -396,12 +426,14 @@ pub async fn run_agent<C, H>(
                 }
             }
             Next::Wait(secs) => {
+                tracing::info!("agent: backing off {secs}s before next attempt");
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(secs)) => continue,
                     _ = shutdown.changed() => return,
                 }
             }
             Next::Attempt(endpoint, first) => {
+                tracing::info!(state = ?first.body, "agent: connecting to {endpoint}");
                 let mut session = match connector.connect(&endpoint).await {
                     Ok(s) => s,
                     Err(e) => {
@@ -496,6 +528,7 @@ pub async fn run_agent<C, H>(
         }
 
         // Session ended → bounded backoff, then reconnect.
+        tracing::info!("agent: session ended; scheduling reconnect");
         agent.lock().unwrap().on_failure();
     }
 }
