@@ -48,10 +48,14 @@ make test     # engine + HTTP integration tests (fake sysroot, no hardware)
 make lint     # clippy -D warnings + rustfmt --check
 make vendor   # regenerate the offline crate tarball for reproducible builds
 make cross    # build all three cross-targets: x86_64, aarch64, armv7
-make run      # run the daemon against a tempdir fake sysroot (dev)
+make run-mock # run against a tempdir fake sysroot (mock backends) — DEFAULT dev loop
+make run      # run against the REAL host (/proc, real backends) — hardware only
+make check    # build && test && lint — the validation gate
 ```
 
-Validation gate (used by the git workflows and CI): `make build && make test && make lint`.
+Validation gate (used by the git workflows and CI): `make check` (= build && test && lint).
+Default development loop is `make run-mock` (no hardware needed); `make run` touches the
+live host and is only meaningful on a target device.
 
 ## Cross-targets
 
