@@ -91,8 +91,15 @@ COPY crates ./crates
 COPY board-manifests ./board-manifests
 COPY schemas ./schemas
 
-# Add the cross target (no-op for the native host target).
-RUN rustup target add "$RUST_TARGET"
+# Add the cross target.  This is a no-op for the native host target and would
+# otherwise force an unnecessary (and flaky) rustup channel sync against
+# static.rust-lang.org, so skip the network call entirely when RUST_TARGET
+# matches the toolchain's host triple.
+RUN if [ "$RUST_TARGET" = "$(rustc --print host-tuple)" ]; then \
+        echo "RUST_TARGET=$RUST_TARGET is the native host target; no rustup target add needed"; \
+    else \
+        rustup target add "$RUST_TARGET"; \
+    fi
 
 # Compile (deps cached) and copy the binary out of the cache mount to /out.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
