@@ -104,6 +104,28 @@ lint-checksums: ## Fail if any placeholder/invalid release checksum remains in t
 				echo "  OK: $$var checksum = $$sha"; \
 			fi; \
 		done; \
+		if [ -f dist/vendor.tar.gz ]; then \
+			want=$$(sha256sum dist/vendor.tar.gz | awk '{print $$1}'); \
+			have=$$(grep -oE "SRC_URI\[vendor\.sha256sum\] = \"[0-9a-f]{64}\"" "$$f" | grep -oE '[0-9a-f]{64}'); \
+			if [ "$$want" != "$$have" ]; then \
+				echo "  FAIL: vendor checksum drift - recipe has $$have, dist/ has $$want"; \
+				echo "        run: make vendor && make release-artifacts, then paste the checksums into the recipe"; \
+				fail=1; \
+			else \
+				echo "  OK: vendor checksum matches dist/vendor.tar.gz"; \
+			fi; \
+		fi; \
+		src_tar=$$(ls dist/webconfigd-*.tar.gz 2>/dev/null | head -1); \
+		if [ -n "$$src_tar" ]; then \
+			want=$$(sha256sum "$$src_tar" | awk '{print $$1}'); \
+			have=$$(grep -oE "SRC_URI\[src\.sha256sum\] = \"[0-9a-f]{64}\"" "$$f" | grep -oE '[0-9a-f]{64}'); \
+			if [ "$$want" != "$$have" ]; then \
+				echo "  FAIL: src checksum drift - recipe has $$have, $$src_tar has $$want"; \
+				fail=1; \
+			else \
+				echo "  OK: src checksum matches $$src_tar"; \
+			fi; \
+		fi; \
 	done; \
 	[ "$$fail" -eq 0 ] || { echo "ERROR: release checksum gate failed (task 28)"; exit 1; }
 lint: ## clippy -D warnings + rustfmt --check

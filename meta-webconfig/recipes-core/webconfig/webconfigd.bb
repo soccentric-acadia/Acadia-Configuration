@@ -40,8 +40,8 @@ SRC_URI = " \
 # release cut — like any recipe fetching a version-pinned tarball, this
 # checksum is only valid for the exact tarball contents it was computed from,
 # not a permanently-fixed value.
-SRC_URI[src.sha256sum] = "92fb5966b71ef40989ead01fdd7f0d81993c056c72e9f68e377df5a0e98041d2"
-SRC_URI[vendor.sha256sum] = "32045b440cc598ca862c198fd2aac8d15b3018dd20ab2d59cd3a077f375a56dc"
+SRC_URI[src.sha256sum] = "7b672bf9e7294b5d5991fef98c7b855bd8fce5ef08b5c789ac3aaa79e4bb6138"
+SRC_URI[vendor.sha256sum] = "14de03f66d92bb776df9d6f1ae71823ebe43fb902f0453c406f99efe1b07c3d2"
 
 S = "${WORKDIR}/webconfigd-${PV}"
 
