@@ -7,13 +7,11 @@
 # Targets:
 #   make toolchain  — install rustup + the exact pinned toolchain (one-time
 #                     host setup; see rust-toolchain.toml)
-#   make build      — debug build of the daemon (host target)
-#   make release    — release build with the exact spec §2 profile
+#   make build      — build the production webconfigd Docker image (fleet default)
 #   make test       — engine + HTTP integration tests (fake sysroot, no HW)
 #   make lint       — clippy + rustfmt --check
 #   make fmt        — format in place
 #   make vendor     — (re)generate the vendored offline crate tarball
-#   make cross      — build all three cross-targets (CI parity; uses
 #                     cargo-zigbuild automatically if the GNU cross
 #                     toolchain isn't installed)
 #   make run        — run the daemon against the real host (live /proc, real
@@ -53,17 +51,11 @@ TARGETS := x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linu
 # drift from the pin.
 RUST_CHANNEL := $(shell grep -m1 '^channel' rust-toolchain.toml | sed -E 's/.*"([^"]*)".*/\1/')
 
-.PHONY: help build release test lint fmt vendor release-artifacts cross run run-mock stop clean check toolchain docker-build docker-build-arm64 docker-build-armv7 docker-run docker-stop docker-logs docker-clean
+.PHONY: help build test lint fmt vendor release-artifacts run run-mock stop clean check toolchain docker-build docker-build-arm64 docker-build-armv7 docker-run docker-stop docker-logs docker-clean
 
 # Bare `make` prints help rather than building, so a stray invocation never
 # kicks off a network install or a build by surprise.
 
-
-build: ## Debug build of the daemon (host target)
-	$(CARGO) build --workspace
-
-release: ## Release build, exact spec §2 profile (opt-level=z, lto, stripped)
-	$(CARGO) build --workspace --release
 
 test: ## Engine + HTTP integration tests (fake sysroot, no hardware)
 	$(CARGO) test --workspace --all-targets
@@ -171,31 +163,6 @@ release-artifacts: ## Package release tarballs + compute real checksums for webc
 # usually has neither, but the machine's alternate cross toolchain — cargo-zigbuild
 # plus a zig compiler — produces the same result without any system gcc cross
 # packages. Use GNU when present (true CI parity), otherwise fall back to zigbuild.
-cross: ## Build all three cross-targets (x86_64/aarch64/armv7), CI parity
-	@set -e; \
-	if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then \
-		echo "==> cross-compiling with GNU toolchain (CI parity)"; \
-		CMD="$(CARGO) build --workspace --release --target"; \
-	elif command -v cargo-zigbuild >/dev/null 2>&1; then \
-		ZIG="$$(command -v zig 2>/dev/null || true)"; \
-		if [ -z "$$ZIG" ] && [ -x "$$HOME/zig/zig" ]; then ZIG="$$HOME/zig/zig"; fi; \
-		if [ -n "$$ZIG" ]; then \
-			echo "==> GNU cross toolchain not found; using cargo-zigbuild (zig: $$ZIG)"; \
-			export PATH="$$(dirname "$$ZIG"):$$PATH"; \
-			CMD="$(CARGO) zigbuild --workspace --release --target"; \
-		else \
-			echo "ERROR: cargo-zigbuild present but no zig compiler on PATH or ~/zig/zig." >&2; \
-			exit 1; \
-		fi; \
-	else \
-		echo "ERROR: no cross toolchain. Install GNU cross gcc (gcc-aarch64-linux-gnu, gcc-arm-linux-gnueabihf) OR cargo-zigbuild + zig." >&2; \
-		exit 1; \
-	fi; \
-	for t in $(TARGETS); do \
-		echo "==> building $$t"; \
-		$$CMD $$t || exit 1; \
-	done
-
 # Dev run against the REAL host sysroot (spec §6): no WEBCONFIG_SYSROOT is
 # set, so resolve_sysroot() uses "/" and is_real_root() is true — the daemon
 # reads live /proc + /sys and uses the real systemd/update backends (mock
@@ -249,33 +216,37 @@ stop: ## Stop the process listening on WEBCONFIG_PORT (default: 8443)
 clean: ## Remove target/
 	$(CARGO) clean
 
-# ── Docker ────────────────────────────────────────────────────────────────────
-# Production container image: the webconfigd daemon + frontend + schemas +
-# board manifest in the canonical install layout. See docker/Dockerfile.
+# ── Docker (fleet-standard build) ────────────────────────────────────────────
+# The default build is the production container image (daemon + frontend +
+# schemas + board manifest) — see docker/Dockerfile. `make build` = Docker.
 
-docker-build: ## docker-build — build the production webconfigd image (host arch)
-	$(MAKE) -C docker build IMAGE_NAME=$(shell basename $$(pwd) | tr 'A-Z' 'a-z' | sed 's/-configuration/-webconfigd/')
+.PHONY: docker-build docker-build-arm64 docker-build-armv7 docker-run docker-stop docker-logs docker-clean
 
-docker-build-arm64: ## docker-build-arm64 — cross-build the arm64 webconfigd image (Raspberry Pi 5 / Zynq MPSoC)
-	$(MAKE) -C docker build-arm64 IMAGE_NAME=$(shell basename $$(pwd) | tr 'A-Z' 'a-z' | sed 's/-configuration/-webconfigd/')
+build: docker-build ## Build the production webconfigd image in Docker (fleet default)
 
-docker-build-armv7: ## docker-build-armv7 — cross-build the armv7 webconfigd image (32-bit Pi 2/3-class)
-	$(MAKE) -C docker build-armv7 IMAGE_NAME=$(shell basename $$(pwd) | tr 'A-Z' 'a-z' | sed 's/-configuration/-webconfigd/')
+docker-build: ## Build the production webconfigd image (host arch)
+	$(MAKE) -C docker build IMAGE_NAME=acadia-webconfigd
 
-docker-run: ## docker-run — run the container (production, port 8443)
-	$(MAKE) -C docker run IMAGE_NAME=$(shell basename $$(pwd) | tr 'A-Z' 'a-z' | sed 's/-configuration/-webconfigd/')
+docker-build-arm64: ## Cross-build the arm64 webconfigd image (Raspberry Pi 5 / Zynq MPSoC)
+	$(MAKE) -C docker build-arm64 IMAGE_NAME=acadia-webconfigd
 
-docker-stop: ## docker-stop — stop and remove the container
+docker-build-armv7: ## Cross-build the armv7 webconfigd image (32-bit Pi 2/3-class)
+	$(MAKE) -C docker build-armv7 IMAGE_NAME=acadia-webconfigd
+
+docker-run: ## Run the container (production, port 8443)
+	$(MAKE) -C docker run IMAGE_NAME=acadia-webconfigd
+
+docker-stop: ## Stop and remove the container
 	$(MAKE) -C docker stop
 
-docker-logs: ## docker-logs — tail container logs
+docker-logs: ## Tail container logs
 	$(MAKE) -C docker logs
 
-docker-clean: ## docker-clean — remove the built image
-	$(MAKE) -C docker clean IMAGE_NAME=$(shell basename $$(pwd) | tr 'A-Z' 'a-z' | sed 's/-configuration/-webconfigd/')
+docker-clean: ## Remove the built image
+	$(MAKE) -C docker clean IMAGE_NAME=acadia-webconfigd
 
 # Convenience alias: full validation gate (§9 step 6).
-check: build test lint ## Full validation gate: build && test && lint
+check: build test lint ## Full validation gate: build (Docker) && test && lint
 
 # ── Fleet-standard aliases ────────────────────────────────────────────────────
 # Same verbs mean the same thing in every repo; these forward to this
