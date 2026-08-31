@@ -56,11 +56,14 @@ ARG RUST_TARGET
 
 # apt build helpers. Only the matching cross GNU toolchain is installed when the
 # target differs from the host; the native build needs just pkg-config/gcc.
+# protobuf-compiler (protoc) is required by hq-agent's build script
+# (tonic-build/prost-build compiles proto/acadiahq/agent.proto at build time).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       pkg-config \
       ca-certificates \
       gcc \
+      protobuf-compiler \
  && case "$RUST_TARGET" in \
       aarch64-unknown-linux-gnu) \
         apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross ;; \
