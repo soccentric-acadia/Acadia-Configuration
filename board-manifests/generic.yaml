@@ -18,8 +18,6 @@ service_allowlist:
   - cron.service
   - crond.service
   - dbus.service
-  - docker.service
-  - containerd.service
   - nginx.service
   - webconfigd.service
 peripherals: []

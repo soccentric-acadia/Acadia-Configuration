@@ -4,7 +4,10 @@
 
 Acadia-Configuration is the Rust Cargo workspace for the on-device WebConfig daemon and
 configuration engine. The root Makefile is the required entry point for host builds, tests,
-linting, cross-target parity, release artifact generation, and Docker execution.
+linting, cross-target parity, release artifact generation, and daemon execution. All builds are
+native: plain cargo on the host and GNU cross-compiles for the device targets. Deployment is
+the meta-webconfig Yocto layer — the OS image builds webconfigd itself from the release
+tarballs.
 
 ## 1. Prerequisites
 
@@ -12,8 +15,11 @@ linting, cross-target parity, release artifact generation, and Docker execution.
 - Rustup and the pinned Rust toolchain. `make toolchain` installs rustup if needed, Rust
 `1.97.1`, `rustfmt`, `clippy`, and targets `x86_64-unknown-linux-gnu`,
 `aarch64-unknown-linux-gnu`, and `armv7-unknown-linux-gnueabihf`.
-- Docker for image targets; network access is required for rustup, Cargo dependencies, and the
-KAS/Yocto integration that consumes this component.
+- Network access is required for rustup, Cargo dependencies, and the KAS/Yocto integration
+that consumes this component.
+- Cross builds additionally need the GNU cross linkers (`gcc-aarch64-linux-gnu`,
+`gcc-arm-linux-gnueabihf`), which `make toolchain`'s rustup targets plus
+`.cargo/config.toml` expect to be on the PATH.
 
 The workspace uses Rust edition 2021, a bundled SQLite build, rustls rather than OpenSSL, and a
 release profile with size optimization, LTO, one codegen unit, abort-on-panic, and stripped
@@ -37,9 +43,10 @@ make release
 make cross
 ```
 
-`build` runs `cargo build --workspace`; `release` runs the same with `--release`; `cross` builds
-release binaries for all three pinned targets. The daemon package is `crates/webconfigd`; the
-engine is `crates/webconfig-engine`.
+`build` runs `cargo build --workspace`; `release` runs the same with `--release` (the exact
+spec profile: opt-level=z, LTO, panic=abort, stripped); `cross` release-builds the workspace
+for `aarch64-unknown-linux-gnu` and `armv7-unknown-linux-gnueabihf`. The daemon package is
+`crates/webconfigd`; the engine is `crates/webconfig-engine`.
 
 ## 4. Test and lint
 
@@ -64,44 +71,32 @@ make release-artifacts
 `make vendor` regenerates the versioned offline Cargo vendor tree and should be rerun after
 dependency changes. `make release-artifacts` invokes `tools/release-artifacts.sh` to package the
 source and vendor tarballs and print SHA-256 checksums. Release binaries are emitted by Cargo
-under `target/release/<target>/` as applicable. Docker targets build the production `webconfigd`
-image, using the repository Dockerfile and canonical install layout.
+under `target/release/<target>/` as applicable.
 
 ## 6. Deployment, install, and run
 
 ```sh
 make run-mock
 make run WEBCONFIG_PORT=8443
-make docker-build
-make docker-build-arm64
-make docker-build-armv7
-make docker-run
-make docker-logs
-make docker-stop
 ```
 
 `run-mock` uses a temporary fake sysroot and has no hardware side effects. `run` uses the real
 host `/proc` and `/sys`, real systemd/update backends, persistent `./data`, and port `8443` by
 default; treat it as conditional and suitable only on the intended device or a disposable host.
-`docker-build` builds the native (x86_64) image with the legacy builder.
-`docker-build-arm64` cross-compiles a true aarch64 image (no QEMU emulation): the Docker
-builder stage stays on the host architecture and compiles `aarch64-unknown-linux-gnu` with the
-cross GNU toolchain, then assembles a `linux/arm64` runtime image. Both the Raspberry Pi 5 and
-Zynq MPSoC are aarch64, so `docker-build-arm64` produces the image to deploy to them.
-`docker-build-armv7` does the same for 32-bit `armv7-unknown-linux-gnueabihf` devices. The
-cross targets require Docker buildx. The Docker run target exposes the production container
-on port 8443 according to `docker/Makefile`.
+For device deployment, install the cross-built binary plus the frontend, schemas, and board
+manifest via the meta-webconfig Yocto packages (`webconfigd`, `webconfig-static`,
+`webconfig-schemas`, `webconfig-manifest`) into the canonical layout
+(`/usr/share/webconfig/...`).
 
 ## 7. Cleanup
 
 ```sh
 make stop
 make clean
-make docker-clean
 ```
 
 `stop` terminates the process holding `WEBCONFIG_PORT`; `clean` runs `cargo clean` and removes
-`target/`; `docker-clean` removes the built image. The `./data` directory is deliberately
+`target/`. The `./data` directory is deliberately
 persistent for development and must be removed manually when resetting first-boot state.
 
 ## 8. Hardware, cloud, and manual verification caveats

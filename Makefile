@@ -7,13 +7,13 @@
 # Targets:
 #   make toolchain  — install rustup + the exact pinned toolchain (one-time
 #                     host setup; see rust-toolchain.toml)
-#   make build      — build the production webconfigd Docker image (fleet default)
+#   make build      — compile the workspace natively on the host (debug)
+#   make release    — optimized release build on the host (spec profile)
+#   make cross      — release cross-compile for aarch64 + armv7 (device targets)
 #   make test       — engine + HTTP integration tests (fake sysroot, no HW)
 #   make lint       — clippy + rustfmt --check
 #   make fmt        — format in place
-#   make vendor     — (re)generate the vendored offline crate tarball
-#                     cargo-zigbuild automatically if the GNU cross
-#                     toolchain isn't installed)
+#   make vendor     — (re)generate the vendored offline crate sources
 #   make run        — run the daemon against the real host (live /proc, real
 #                     backends); persistent state in ./data (dev)
 #   make run-mock   — run against a tempdir fake sysroot (mock backends, no HW)
@@ -51,7 +51,7 @@ TARGETS := x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linu
 # drift from the pin.
 RUST_CHANNEL := $(shell grep -m1 '^channel' rust-toolchain.toml | sed -E 's/.*"([^"]*)".*/\1/')
 
-.PHONY: help build test lint fmt vendor release-artifacts run run-mock stop clean check toolchain docker-build docker-build-arm64 docker-build-armv7 docker-run docker-stop docker-logs docker-clean
+.PHONY: help build release cross test lint fmt vendor release-artifacts run run-mock stop clean check toolchain
 
 # Bare `make` prints help rather than building, so a stray invocation never
 # kicks off a network install or a build by surprise.
@@ -156,13 +156,6 @@ vendor: ## Regenerate the vendored offline crate tarball
 release-artifacts: ## Package release tarballs + compute real checksums for webconfigd.bb
 	@./tools/release-artifacts.sh
 
-# Cross-compile parity check for CI (spec §6).
-#
-# CI installs the GNU cross toolchains (gcc-aarch64-linux-gnu, gcc-arm-linux-gnueabihf)
-# and the committed .cargo/config.toml points the linker at them. A local developer
-# usually has neither, but the machine's alternate cross toolchain — cargo-zigbuild
-# plus a zig compiler — produces the same result without any system gcc cross
-# packages. Use GNU when present (true CI parity), otherwise fall back to zigbuild.
 # Dev run against the REAL host sysroot (spec §6): no WEBCONFIG_SYSROOT is
 # set, so resolve_sysroot() uses "/" and is_real_root() is true — the daemon
 # reads live /proc + /sys and uses the real systemd/update backends (mock
@@ -216,37 +209,31 @@ stop: ## Stop the process listening on WEBCONFIG_PORT (default: 8443)
 clean: ## Remove target/
 	$(CARGO) clean
 
-# ── Docker (fleet-standard build) ────────────────────────────────────────────
-# The default build is the production container image (daemon + frontend +
-# schemas + board manifest) — see docker/Dockerfile. `make build` = Docker.
+# ── Native builds ─────────────────────────────────────────────────────────────
+# The daemon builds natively with the pinned toolchain: plain cargo on the host
+# and, for the device targets, a true cross-compile against the GNU cross
+# toolchains (linkers are wired up in .cargo/config.toml; the rustup targets
+# are installed by `make toolchain`). Deployment is the meta-webconfig Yocto
+# layer — the image builds webconfigd from the release tarballs itself.
 
-.PHONY: docker-build docker-build-arm64 docker-build-armv7 docker-run docker-stop docker-logs docker-clean
+build: ## Compile the workspace natively on the host (debug)
+	$(CARGO) build --workspace
 
-build: docker-build ## Build the production webconfigd image in Docker (fleet default)
+release: ## Optimized release build on the host (spec profile)
+	$(CARGO) build --workspace --release
 
-docker-build: ## Build the production webconfigd image (host arch)
-	$(MAKE) -C docker build IMAGE_NAME=acadia-webconfigd
+CROSS_TARGETS := aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf
 
-docker-build-arm64: ## Cross-build the arm64 webconfigd image (Raspberry Pi 5 / Zynq MPSoC)
-	$(MAKE) -C docker build-arm64 IMAGE_NAME=acadia-webconfigd
-
-docker-build-armv7: ## Cross-build the armv7 webconfigd image (32-bit Pi 2/3-class)
-	$(MAKE) -C docker build-armv7 IMAGE_NAME=acadia-webconfigd
-
-docker-run: ## Run the container (production, port 8443)
-	$(MAKE) -C docker run IMAGE_NAME=acadia-webconfigd
-
-docker-stop: ## Stop and remove the container
-	$(MAKE) -C docker stop
-
-docker-logs: ## Tail container logs
-	$(MAKE) -C docker logs
-
-docker-clean: ## Remove the built image
-	$(MAKE) -C docker clean IMAGE_NAME=acadia-webconfigd
+cross: ## Release cross-compile for the device targets (aarch64, armv7)
+	@set -e; \
+	for t in $(CROSS_TARGETS); do \
+		echo "==> cargo build --workspace --release --target $$t"; \
+		$(CARGO) build --workspace --release --target $$t; \
+		echo "==> $$t: target/$$t/release/webconfigd"; \
+	done
 
 # Convenience alias: full validation gate (§9 step 6).
-check: build test lint ## Full validation gate: build (Docker) && test && lint
+check: build test lint ## Full validation gate: build && test && lint
 
 # ── Fleet-standard aliases ────────────────────────────────────────────────────
 # Same verbs mean the same thing in every repo; these forward to this
