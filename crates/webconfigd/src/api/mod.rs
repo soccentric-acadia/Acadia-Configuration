@@ -6,6 +6,7 @@
 //! is re-validated server-side by the engine + appliers (spec §2).
 
 pub mod alerts;
+pub mod device;
 pub mod io;
 pub mod logs;
 pub mod meta;

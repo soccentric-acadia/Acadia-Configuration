@@ -26,8 +26,8 @@ const INSTALL_LIMIT: usize = 4 * 1024; // {"bundle_path": "..."} — a path stri
 const UPLOAD_BUNDLE_LIMIT: usize = 512 * 1024 * 1024;
 
 use crate::api::{
-    alerts, io, logs, meta, monitoring, network, operations, pairing, security, services, system,
-    updates,
+    alerts, device, io, logs, meta, monitoring, network, operations, pairing, security, services,
+    system, updates,
 };
 use crate::auth;
 use crate::csrf;
@@ -59,6 +59,7 @@ pub fn build_router(state: AppState, static_dir: std::path::PathBuf) -> Router {
         .route("/manifest", get(meta::manifest))
         .route("/schemas/:section", get(meta::schema_section))
         .route("/operations", get(operations::list))
+        .route("/device/status", get(device::status))
         // System (§4.1)
         .route("/system", get(system::get).put(system::put))
         .route("/system/apply", post(system::apply))
