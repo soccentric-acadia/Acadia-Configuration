@@ -272,6 +272,14 @@ where
         Some(pb::server_frame::Body::Command(command)) => {
             let accepted_at_mono_ns = monotonic_now_ns();
             let (success, error) = handler.handle(command.clone()).await;
+            let code = if success {
+                "OK".into()
+            } else {
+                error
+                    .split_once(':')
+                    .map(|(code, _)| code.to_string())
+                    .unwrap_or_else(|| "INTERNAL".into())
+            };
             let correlation_id = if command.correlation_id.is_empty() {
                 command.command_id.clone()
             } else {
@@ -284,11 +292,7 @@ where
                     error,
                     daemon: command.daemon,
                     operation: command.operation,
-                    code: if success {
-                        "OK".into()
-                    } else {
-                        "UNIMPLEMENTED".into()
-                    },
+                    code,
                     json_payload: String::new(),
                     correlation_id,
                     accepted_at_mono_ns,

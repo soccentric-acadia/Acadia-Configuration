@@ -14,6 +14,8 @@ mod bootstrap;
 mod csrf;
 mod engine_bridge;
 mod error;
+mod hq_command_handler;
+mod istate_client;
 mod jobs;
 mod routes;
 mod server;
@@ -73,7 +75,9 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(hq_agent::run_agent(
         pairing,
         hq_agent::GrpcConnector::default(),
-        hq_agent::IdempotentCommandHandler::new(hq_agent::NullCommandHandler),
+        hq_agent::IdempotentCommandHandler::new(hq_command_handler::IstateCommandHandler::new(
+            Arc::new(istate_client::UnavailableIstateClient),
+        )),
         agent_stop_rx,
     ));
     // Ensure the loop stops cleanly when main exits (process death covers the
