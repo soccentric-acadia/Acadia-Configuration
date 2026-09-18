@@ -11,6 +11,7 @@ pub mod logs;
 pub mod meta;
 pub mod monitoring;
 pub mod network;
+pub mod operations;
 pub mod pairing;
 pub mod security;
 pub mod services;
