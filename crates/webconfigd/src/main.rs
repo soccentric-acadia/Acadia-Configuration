@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(hq_agent::run_agent(
         pairing,
         hq_agent::GrpcConnector::default(),
-        hq_agent::NullCommandHandler,
+        hq_agent::IdempotentCommandHandler::new(hq_agent::NullCommandHandler),
         agent_stop_rx,
     ));
     // Ensure the loop stops cleanly when main exits (process death covers the

@@ -20,7 +20,9 @@
 //! object-safe traits so unit tests drive the state machine against an
 //! in-memory mock with no network. [`GrpcConnector`] is the tonic client.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{mpsc, watch};
@@ -68,6 +70,54 @@ pub trait AgentConnector: Send + Sync + 'static {
 #[async_trait::async_trait]
 pub trait CommandHandler: Send + Sync + 'static {
     async fn handle(&self, command: pb::Command) -> (bool, String);
+}
+
+/// Adds device-side at-most-once behavior to any command implementation.
+/// The cache is intentionally bounded so a compromised gateway cannot make
+/// the agent retain unbounded command history.
+pub struct IdempotentCommandHandler<H> {
+    inner: H,
+    completed: Mutex<HashMap<String, (bool, String)>>,
+    capacity: usize,
+}
+
+impl<H> IdempotentCommandHandler<H> {
+    pub fn new(inner: H) -> Self {
+        Self::with_capacity(inner, 256)
+    }
+
+    pub fn with_capacity(inner: H, capacity: usize) -> Self {
+        assert!(capacity > 0, "idempotency cache capacity must be positive");
+        Self {
+            inner,
+            completed: Mutex::new(HashMap::new()),
+            capacity,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<H: CommandHandler> CommandHandler for IdempotentCommandHandler<H> {
+    async fn handle(&self, command: pb::Command) -> (bool, String) {
+        let key = if command.idempotency_key.is_empty() {
+            command.command_id.clone()
+        } else {
+            command.idempotency_key.clone()
+        };
+        if let Some(result) = self.completed.lock().unwrap().get(&key).cloned() {
+            return result;
+        }
+
+        let result = self.inner.handle(command).await;
+        let mut completed = self.completed.lock().unwrap();
+        if completed.len() >= self.capacity {
+            if let Some(oldest) = completed.keys().next().cloned() {
+                completed.remove(&oldest);
+            }
+        }
+        completed.insert(key, result.clone());
+        result
+    }
 }
 
 /// Refuses every command with a well-formed ack until the per-daemon
@@ -220,16 +270,39 @@ where
             false
         }
         Some(pb::server_frame::Body::Command(command)) => {
+            let accepted_at_mono_ns = monotonic_now_ns();
             let (success, error) = handler.handle(command.clone()).await;
+            let correlation_id = if command.correlation_id.is_empty() {
+                command.command_id.clone()
+            } else {
+                command.correlation_id.clone()
+            };
             let ack = pb::AgentFrame {
                 body: Some(pb::agent_frame::Body::CommandAck(pb::CommandAck {
                     command_id: command.command_id,
                     success,
                     error,
+                    daemon: command.daemon,
+                    operation: command.operation,
+                    code: if success {
+                        "OK".into()
+                    } else {
+                        "UNIMPLEMENTED".into()
+                    },
+                    json_payload: String::new(),
+                    correlation_id,
+                    accepted_at_mono_ns,
+                    completed_at_mono_ns: monotonic_now_ns(),
+                    retryable: false,
                 })),
             };
             if let Err(e) = session.send(ack).await {
                 tracing::warn!("failed to send CommandAck: {e}");
+            }
+
+            fn monotonic_now_ns() -> u64 {
+                static START: OnceLock<Instant> = OnceLock::new();
+                START.get_or_init(Instant::now).elapsed().as_nanos() as u64
             }
             false
         }
@@ -388,7 +461,7 @@ pub async fn run_agent<C, H>(
         /// Backoff window of `secs` (already jittered); then re-check.
         Wait(u64),
         /// Open a session with this endpoint and first frame.
-        Attempt(String, pb::AgentFrame),
+        Attempt(String, Box<pb::AgentFrame>),
     }
 
     let mut heartbeat_interval = DEFAULT_HEARTBEAT_INTERVAL_SECS;
@@ -406,7 +479,9 @@ pub async fn run_agent<C, H>(
                     PairingOutcome::Revoked => Next::Idle,
                     PairingOutcome::Retry { after_secs } => Next::Wait(jittered(after_secs)),
                     PairingOutcome::Ok => match first_frame(&a) {
-                        Ok(Some(frame)) => Next::Attempt(a.hq_endpoint().to_string(), frame),
+                        Ok(Some(frame)) => {
+                            Next::Attempt(a.hq_endpoint().to_string(), Box::new(frame))
+                        }
                         Ok(None) => Next::Idle,
                         Err(e) => {
                             tracing::warn!("agent: cannot authenticate: {e}");
@@ -443,7 +518,7 @@ pub async fn run_agent<C, H>(
                     }
                 };
 
-                if let Err(e) = session.send(first).await {
+                if let Err(e) = session.send(*first).await {
                     tracing::warn!("agent: first frame failed: {e}");
                     agent.lock().unwrap().on_failure();
                     continue;
@@ -724,6 +799,7 @@ mod tests {
             body: Some(pb::server_frame::Body::Command(pb::Command {
                 command_id: "cmd-7".into(),
                 kind: Some(pb::command::Kind::FactoryReset(pb::FactoryReset {})),
+                ..Default::default()
             })),
         };
         let (conn, session) =
