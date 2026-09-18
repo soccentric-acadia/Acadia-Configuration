@@ -25,3 +25,7 @@
 *.key
 /data/
 vendor/
+
+# Per-task working artifacts.
+Plan.md
+Task.md
