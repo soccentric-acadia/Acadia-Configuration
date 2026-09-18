@@ -21,6 +21,7 @@
 //! in-memory mock with no network. [`GrpcConnector`] is the tonic client.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -36,6 +37,7 @@ pub mod pb {
 /// Contract default (doc/hq-pairing-contract.md §Heartbeat). The gateway may
 /// override per-device via `HeartbeatAck.next_heartbeat_interval_s`.
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: i64 = 30;
+pub const AGENT_PROTOCOL_VERSION: u32 = 1;
 
 /// Wait used when the device has nothing to authenticate with yet.
 const IDLE_POLL_SECS: u64 = 5;
@@ -156,6 +158,7 @@ fn jittered(secs: u64) -> u64 {
 }
 
 fn heartbeat_frame(agent: &PairingAgent, credential: &str) -> pb::Heartbeat {
+    static HEARTBEAT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
     pb::Heartbeat {
         device_id: agent.device_id().unwrap_or_default().to_string(),
         credential_token: credential.to_string(),
@@ -164,7 +167,23 @@ fn heartbeat_frame(agent: &PairingAgent, credential: &str) -> pb::Heartbeat {
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0),
         agent_version: env!("CARGO_PKG_VERSION").to_string(),
+        protocol_version: AGENT_PROTOCOL_VERSION,
+        boot_id: boot_id(),
+        heartbeat_sequence: HEARTBEAT_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1,
+        sent_at_mono_ns: monotonic_now_ns(),
+        capabilities: Vec::new(),
     }
+}
+
+fn boot_id() -> String {
+    static BOOT_ID: OnceLock<String> = OnceLock::new();
+    BOOT_ID
+        .get_or_init(|| {
+            std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                .map(|value| value.trim().to_string())
+                .unwrap_or_else(|_| "unknown".into())
+        })
+        .clone()
 }
 
 fn heartbeat_frame_msg(agent: &PairingAgent, credential: &str) -> pb::AgentFrame {
@@ -304,10 +323,6 @@ where
                 tracing::warn!("failed to send CommandAck: {e}");
             }
 
-            fn monotonic_now_ns() -> u64 {
-                static START: OnceLock<Instant> = OnceLock::new();
-                START.get_or_init(Instant::now).elapsed().as_nanos() as u64
-            }
             false
         }
         Some(pb::server_frame::Body::SignedUploadUrl(url)) => {
@@ -319,6 +334,11 @@ where
         }
         None => false,
     }
+}
+
+fn monotonic_now_ns() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_nanos() as u64
 }
 
 /// The real transport: a thin tonic client for the one streaming RPC. The
@@ -702,6 +722,7 @@ mod tests {
             body: Some(pb::server_frame::Body::HeartbeatAck(pb::HeartbeatAck {
                 server_time_unix_ms: 0,
                 next_heartbeat_interval_s: interval,
+                protocol_version: AGENT_PROTOCOL_VERSION,
             })),
         }
     }
