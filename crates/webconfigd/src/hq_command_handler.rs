@@ -1,16 +1,17 @@
-use std::sync::Arc;
-
 use hq_agent::pb;
 
 use crate::istate_client::{ControlRequest, IstateClient, SharedIstateClient};
+use std::sync::Arc;
+use webconfig_engine::audit::{AuditEntry, AuditLog};
 
 pub struct IstateCommandHandler {
     client: SharedIstateClient,
+    audit: Arc<AuditLog>,
 }
 
 impl IstateCommandHandler {
-    pub fn new(client: Arc<dyn IstateClient>) -> Self {
-        Self { client }
+    pub fn new(client: Arc<dyn IstateClient>, audit: Arc<AuditLog>) -> Self {
+        Self { client, audit }
     }
 
     fn normalize(command: &pb::Command) -> Result<(String, String, String), String> {
@@ -57,6 +58,7 @@ impl hq_agent::CommandHandler for IstateCommandHandler {
             Ok(value) => value,
             Err(error) => return (false, error),
         };
+        let audit_operation = format!("{daemon}:{operation}");
         let request = ControlRequest {
             daemon,
             operation,
@@ -73,10 +75,22 @@ impl hq_agent::CommandHandler for IstateCommandHandler {
             },
             deadline_ms: command.deadline_ms,
         };
-        match self.client.control(request).await {
+        let result = match self.client.control(request).await {
             Ok(reply) if reply.ok => (true, reply.json_payload),
             Ok(reply) => (false, format!("{}: {}", reply.code, reply.message)),
             Err(error) => (false, error.to_string()),
-        }
+        };
+        let _ = self.audit.append(&AuditEntry {
+            ts: time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
+            user: "hq".into(),
+            action: "command".into(),
+            detail: Some(format!(
+                "{audit_operation}: {}",
+                if result.0 { "succeeded" } else { "failed" }
+            )),
+        });
+        result
     }
 }

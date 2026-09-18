@@ -74,6 +74,7 @@ pub(crate) async fn build(sysroot: Sysroot) -> Application {
         telemetry: Arc::new(std::sync::Mutex::new(
             webconfig_engine::telemetry::TelemetryQueue::load(&webconfig_dir),
         )),
+        istate: crate::istate_client::GrpcIstateClient::from_env().await,
     };
 
     Application {

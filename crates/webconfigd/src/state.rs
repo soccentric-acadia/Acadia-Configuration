@@ -12,6 +12,7 @@ use webconfig_engine::users::UserStore;
 
 use crate::auth::LoginThrottle;
 use crate::engine_bridge::EngineBridge;
+use crate::istate_client::SharedIstateClient;
 use crate::systemd::SystemdClient;
 use crate::update_backend::UpdateBackend;
 use webconfig_engine::pairing::PairingAgent;
@@ -38,6 +39,7 @@ pub struct AppState {
     /// Durable telemetry/MQTT delivery queue (task 37): offline queue + retry
     /// + backpressure.
     pub telemetry: Arc<std::sync::Mutex<TelemetryQueue>>,
+    pub istate: SharedIstateClient,
 }
 
 impl AppState {

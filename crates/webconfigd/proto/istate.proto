@@ -1,0 +1,18 @@
+syntax = "proto3";
+package instr.istate;
+import "common.proto";
+
+message ListSpokesRequest {}
+message HealthScoreRequest {}
+message HealthScoreReply {
+  uint32 score = 1;
+  uint32 state = 2;
+  string detail = 3;
+  repeated string factors = 4;
+}
+service ConfigurationApi {
+  rpc Heartbeat(common.Heartbeat) returns (common.HeartbeatAck);
+  rpc GetPeerStatus(ListSpokesRequest) returns (common.PeerStatusList);
+  rpc Control(common.ControlRequest) returns (common.ControlReply);
+  rpc GetHealthScore(HealthScoreRequest) returns (HealthScoreReply);
+}

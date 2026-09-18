@@ -46,6 +46,11 @@ rusqlite = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
 http = { workspace = true }
+tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
+prost = { version = "0.13", default-features = false, features = ["std", "derive"] }
+
+[build-dependencies]
+tonic-build = { version = "0.12", default-features = false, features = ["transport", "prost"] }
 
 [dev-dependencies]
 tempfile = "3.10"

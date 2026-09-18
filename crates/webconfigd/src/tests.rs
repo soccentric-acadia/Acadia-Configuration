@@ -136,6 +136,7 @@ async fn build_app_full(
         telemetry: Arc::new(std::sync::Mutex::new(
             webconfig_engine::telemetry::TelemetryQueue::load(&webconfig_dir),
         )),
+        istate: Arc::new(crate::istate_client::UnavailableIstateClient),
     };
 
     // Static dir: a tempdir is fine; API routes don't depend on it.

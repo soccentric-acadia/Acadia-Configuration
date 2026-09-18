@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
     let static_dir = resolve_static_dir();
     let telemetry = state.telemetry.clone();
     let pairing = state.pairing.clone();
-    let app = routes::build_router(state, static_dir);
+    let app = routes::build_router(state.clone(), static_dir);
 
     // Commit/confirm rollback timer (spec §4.2 flagship feature).
     tokio::spawn(Arc::new(engine.clone()).run_confirm_timer());
@@ -76,7 +76,8 @@ async fn main() -> anyhow::Result<()> {
         pairing,
         hq_agent::GrpcConnector::default(),
         hq_agent::IdempotentCommandHandler::new(hq_command_handler::IstateCommandHandler::new(
-            Arc::new(istate_client::UnavailableIstateClient),
+            state.istate.clone(),
+            state.audit.clone(),
         )),
         agent_stop_rx,
     ));
