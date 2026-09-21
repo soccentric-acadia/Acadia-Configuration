@@ -1,6 +1,7 @@
 //! Background feature workers owned by the daemon process.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use webconfig_engine::alert::{merge_defaults, AlertEngine};
 use webconfig_engine::manifest::BoardManifest;
@@ -9,6 +10,38 @@ use webconfig_engine::telemetry::TelemetryQueue;
 use crate::alert_dispatch::dispatch_event;
 use crate::bootstrap;
 use crate::engine_bridge::EngineBridge;
+
+/// Heartbeat to istate on the shared peer cadence (Instrumentation §3.1).
+///
+/// istate records the last heartbeat of every peer and Configuration's peer
+/// row reads "connected" from it; without this loop the Configuration peer
+/// would always render as unresponsive even while serving traffic. Failures
+/// are logged and retried on the next tick — a quiet hub must never stop the
+/// web UI (R10 degrade, don't block).
+pub(crate) async fn run_istate_heartbeat(client: crate::istate_client::SharedIstateClient) {
+    let mut sequence: u64 = 0;
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        sequence = sequence.wrapping_add(1);
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        // HEALTH_PASS = 0 in instr.common.proto; the generated type is the raw
+        // enum integer, so pass the constant directly.
+        let hb = crate::istate_client::pb::common::Heartbeat {
+            peer: "configuration".to_string(),
+            sequence,
+            mono_ns: now_ns,
+            ready: true,
+            health: 0, // HEALTH_PASS
+            ..Default::default()
+        };
+        if let Err(error) = client.heartbeat(hb).await {
+            tracing::debug!(%error, "istate heartbeat not acknowledged");
+        }
+    }
+}
 
 /// Periodically evaluate configured alert rules against current vitals.
 pub(crate) async fn run_alert_timer(

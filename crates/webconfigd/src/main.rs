@@ -87,6 +87,11 @@ async fn main() -> anyhow::Result<()> {
         let _ = agent_stop; // held for the process lifetime
     });
 
+    // Peer heartbeat to istate (Instrumentation §3.1): istate reports the
+    // configuration peer as connected from this cadence. Degrade, don't block
+    // (R10): a quiet hub logs and retries, it never stops the web UI.
+    tokio::spawn(jobs::run_istate_heartbeat(state.istate.clone()));
+
     let webconfig_dir = engine.sysroot.webconfig_dir();
     server::serve(app, engine, &webconfig_dir, &manifest).await
 }

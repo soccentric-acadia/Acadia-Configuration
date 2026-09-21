@@ -50,6 +50,13 @@ pub enum IstateError {
 #[async_trait::async_trait]
 pub trait IstateClient: Send + Sync + 'static {
     async fn control(&self, request: ControlRequest) -> Result<ControlReply, IstateError>;
+    /// Peer heartbeat to istate (Instrumentation §3.1): proves this daemon's
+    /// event loop is turning so the hub reports the configuration peer as
+    /// connected. Implementations without a live channel report Unavailable.
+    async fn heartbeat(&self, hb: pb::common::Heartbeat) -> Result<pb::common::HeartbeatAck, IstateError> {
+        let _ = hb;
+        Err(IstateError::Unavailable)
+    }
     async fn status(&self) -> Result<serde_json::Value, IstateError> {
         Err(IstateError::Unavailable)
     }
@@ -175,6 +182,17 @@ impl IstateClient for GrpcIstateClient {
                 "state": p.state, "detail": p.detail
             })).collect::<Vec<_>>() }),
         )
+    }
+
+    async fn heartbeat(&self, hb: pb::common::Heartbeat) -> Result<pb::common::HeartbeatAck, IstateError> {
+        Ok(self
+            .client
+            .lock()
+            .await
+            .heartbeat(hb)
+            .await
+            .map_err(|_| IstateError::Transport)?
+            .into_inner())
     }
 }
 
