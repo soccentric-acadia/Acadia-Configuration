@@ -5,7 +5,7 @@
 //! the mock so CI runs with no hardware (spec §6); the real root uses RAUC.
 
 pub use webconfig_engine::update::{
-    MockUpdateBackend, RaucUpdateBackend, SlotStatus, UpdateBackend,
+    MockUpdateBackend, RaucUpdateBackend, SlotStatus, SwupdateUpdateBackend, UpdateBackend,
 };
 
 use std::process::Command;
@@ -16,17 +16,23 @@ use webconfig_engine::Sysroot;
 /// mock on a fake sysroot or a developer host without RAUC installed.
 pub fn make_backend(sysroot: &Sysroot) -> Arc<dyn UpdateBackend> {
     let real_root = sysroot.is_real_root();
-    let rauc_ok = rauc_available();
-    if real_root && rauc_ok {
+    // CFG-001: Acadia-OS ships SWUpdate, so SWUpdate is the backend that
+    // actually runs on the target (RAUC stays supported for other images).
+    let swupdate_ok = real_root && SwupdateUpdateBackend::available();
+    let rauc_ok = real_root && rauc_available();
+    if swupdate_ok {
+        return Arc::new(SwupdateUpdateBackend::new());
+    }
+    if rauc_ok {
         return Arc::new(RaucUpdateBackend::new());
     }
-    if is_degraded_fallback(real_root, rauc_ok) {
-        // A real device with no `rauc` on PATH is a degraded, unexpected
+    if is_degraded_fallback(real_root, swupdate_ok || rauc_ok) {
+        // A real device with neither backend on PATH is a degraded, unexpected
         // state — silently presenting fabricated Slot A/B data here would be
         // indistinguishable from the intentional dev/CI fake-sysroot case
         // (Checkpoint 1.5).
         tracing::warn!(
-            "real root but rauc is unavailable — falling back to a mock update backend \
+            "real root but no swupdate/rauc available — falling back to a mock update backend \
              with fabricated slot data; OS update status/install will not reflect reality"
         );
     }

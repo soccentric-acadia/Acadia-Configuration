@@ -298,6 +298,308 @@ impl UpdateBackend for RaucUpdateBackend {
     }
 }
 
+/// SWUpdate backend (real) — CFG-001.
+///
+/// Acadia-OS ships SWUpdate (not RAUC), so this is the backend that actually
+/// runs on the target. Assumptions (per spec §7, stated at the point they're
+/// made):
+///
+/// - The OS is the OS-016 tryboot layout: per-slot boot dirs `/boot/A` and
+///   `/boot/B`, `/boot/autoboot.txt` with `boot_prefix=` / `boot_prefix_try=`,
+///   and `/boot/boot_state` (slot / prev_slot / tries_remaining / confirmed)
+///   written by SWUpdate's post-install hook.
+/// - Slot identity comes from the rootfs GPT labels `rootfs-a` / `rootfs-b`
+///   (WKS-partitioned identically on every supported device).
+/// - The running slot's version is read from `/etc/os-release`; the inactive
+///   slot's version is reported as `unknown` (its rootfs is not mounted —
+///   mounting the other slot just to read a version would be a destructive
+///   side effect the update page must not cause).
+/// - Bundle compatibility: SWUpdate itself verifies bundle signature and
+///   `hardware-compatibility` at install; verify_bundle() extracts
+///   sw-description from the .swu cpio archive and checks the device
+///   hardware compat (from `/etc/hwrevision`) up front so an incompatible
+///   bundle never reaches the install stage.
+/// - Confirmation (`mark_good`) performs the tryboot confirm: autoboot.txt's
+///   boot_prefix is made permanent for the running slot — mirroring what
+///   SWUpdate's swupdate-bootcheck does on the automatic path.
+#[derive(Debug, Default)]
+pub struct SwupdateUpdateBackend;
+
+impl SwupdateUpdateBackend {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Whether an SWUpdate environment is plausibly present (the CLI exists).
+    pub fn available() -> bool {
+        std::process::Command::new("swupdate")
+            .arg("--version")
+            .output()
+            .is_ok()
+    }
+
+    /// Atomic file write helper (temp + fsync + rename) for /boot files.
+    fn atomic_write(path: &str, content: &str) -> Result<(), UpdateError> {
+        let tmp = format!("{path}.tmp");
+        std::fs::write(&tmp, content)?;
+        let _ = std::process::Command::new("sync").arg("-f").arg(&tmp).output();
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// The slot letter (a|b) of the currently running root filesystem, from
+    /// the rootfs partition label; None when not an A/B layout.
+    fn running_slot() -> Option<String> {
+        let out = std::process::Command::new("findmnt")
+            .args(["-n", "-o", "SOURCE", "/"])
+            .output()
+            .ok()?;
+        let dev = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if dev.is_empty() {
+            return None;
+        }
+        let lbl = std::process::Command::new("lsblk")
+            .args(["-n", "-o", "LABEL", &dev])
+            .output()
+            .ok()?;
+        let label = String::from_utf8_lossy(&lbl.stdout).trim().to_string();
+        match label.as_str() {
+            "rootfs-a" => Some("a".into()),
+            "rootfs-b" => Some("b".into()),
+            _ => None,
+        }
+    }
+
+    /// Parse /boot/boot_state key=value lines (no `source`-style evaluation).
+    fn boot_state() -> Option<std::collections::HashMap<String, String>> {
+        let raw = std::fs::read_to_string("/boot/boot_state").ok()?;
+        Some(
+            raw.lines()
+                .filter_map(|l| l.split_once('='))
+                .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                .collect(),
+        )
+    }
+
+    /// The device hardware revision for SWUpdate compatibility checks —
+    /// `/etc/hwrevision` contains `<board> <rev>` (SWUpdate's convention).
+    fn device_hwrevision() -> Option<String> {
+        let raw = std::fs::read_to_string("/etc/hwrevision").ok()?;
+        raw.split_whitespace().nth(1).map(|s| s.to_string())
+    }
+}
+
+impl UpdateBackend for SwupdateUpdateBackend {
+    fn slots(&self) -> Result<Vec<SlotStatus>, UpdateError> {
+        let running = Self::running_slot().ok_or_else(|| {
+            UpdateError::Other("rootfs is not a rootfs-a/b A/B layout".into())
+        })?;
+        let version = std::fs::read_to_string("/etc/os-release")
+            .ok()
+            .and_then(|raw| {
+                raw.lines()
+                    .find_map(|l| l.strip_prefix("VERSION="))
+                    .map(|v| v.trim_matches('"').to_string())
+            })
+            .unwrap_or_else(|| "unknown".into());
+        let state = Self::boot_state();
+        let confirmed = state
+            .as_ref()
+            .map(|s| s.get("confirmed").map(String::as_str) == Some("true"))
+            .unwrap_or(true); // no pending update = confirmed
+
+        let mut slots = Vec::with_capacity(2);
+        for letter in ["a", "b"] {
+            let is_running = letter == running;
+            slots.push(SlotStatus {
+                slot: letter.to_uppercase(),
+                version: if is_running {
+                    version.clone()
+                } else {
+                    "unknown".into()
+                },
+                running: is_running,
+                confirmed: if is_running { confirmed } else { !state.is_some() },
+                state: if is_running && confirmed {
+                    "good".into()
+                } else {
+                    "unknown".into()
+                },
+            });
+        }
+        Ok(slots)
+    }
+
+    fn verify_bundle(&self, bundle_path: &str) -> Result<BundleManifest, UpdateError> {
+        // Extract sw-description from the .swu (a cpio archive) into a temp
+        // dir. cpio is present on any image that runs SWUpdate.
+        let tmp = std::env::temp_dir().join(format!("acadia-swu-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp)?;
+        let extracted = std::process::Command::new("sh")
+            .current_dir(&tmp)
+            .args([
+                "-c",
+                "cpio -i --no-absolute-filenames -F \"$1\" sw-description 2>/dev/null",
+                "extract-swd",
+            ])
+            .arg(bundle_path)
+            .output()
+            .map_err(|e| UpdateError::Other(format!("cpio spawn: {e}")));
+        let desc = match extracted {
+            Ok(out) if out.status.success() => std::fs::read_to_string(tmp.join("sw-description"))
+                .map_err(|e| UpdateError::Signature(format!("sw-description unreadable: {e}")))?,
+            Ok(out) => {
+                let _ = std::fs::remove_dir_all(&tmp);
+                return Err(UpdateError::Signature(format!(
+                    "swu extraction failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                )));
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&tmp);
+                return Err(UpdateError::Signature(format!("swu extraction spawn: {e}")));
+            }
+        };
+
+        // Parse software = { version = "X"; hardware-compatibility = [...]; }.
+        let mut version = String::new();
+        let mut hw_compat: Vec<String> = Vec::new();
+        let mut in_compat = false;
+        for line in desc_lines(&desc) {
+            let line = line.trim();
+            if in_compat {
+                if line.starts_with("]") || line.starts_with("};") {
+                    in_compat = false;
+                } else if let Some(v) = line.split('"').nth(1) {
+                    hw_compat.push(v.to_string());
+                }
+                continue;
+            }
+            if line.starts_with("hardware-compatibility") {
+                in_compat = true;
+            } else if line.starts_with("version") {
+                if let Some(v) = line.split('"').nth(1) {
+                    version = v.to_string();
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        if version.is_empty() {
+            return Err(UpdateError::Signature(
+                "sw-description has no version field".into(),
+            ));
+        }
+
+        // Device-side hardware compatibility: refuse a bundle that declares
+        // hardware revisions none of which matches this device. SWUpdate
+        // would enforce this again at install; checking here keeps a wrong
+        // bundle off the install path entirely (spec §4.4).
+        if let Some(dev_rev) = Self::device_hwrevision() {
+            if !hw_compat.is_empty() && !hw_compat.iter().any(|h| h == &dev_rev) {
+                return Err(UpdateError::Incompatible {
+                    bundle: format!("hw {}", dev_rev),
+                    device: "acadia".into(),
+                });
+            }
+        }
+
+        Ok(BundleManifest {
+            platform: "acadia".into(),
+            variant: None,
+            version,
+            description: None,
+        })
+    }
+
+    fn install(
+        &self,
+        bundle_path: &str,
+        on_progress: &mut dyn FnMut(InstallProgress),
+    ) -> Result<(), UpdateError> {
+        on_progress(InstallProgress {
+            stage: InstallStage::Verify,
+            percent: 5,
+            message: "handing bundle to swupdate".into(),
+        });
+        on_progress(InstallProgress {
+            stage: InstallStage::Write,
+            percent: 50,
+            message: "writing inactive slot (swupdate)".into(),
+        });
+        // Preferred: the running SWUpdate daemon via its IPC client. Fallback:
+        // one-shot local update (`swupdate -u`) when no daemon is reachable.
+        let via_client = std::process::Command::new("swupdate-client")
+            .arg(bundle_path)
+            .output();
+        let ok = match via_client {
+            Ok(out) => out.status.success(),
+            Err(_) => false,
+        };
+        if !ok {
+            let out = std::process::Command::new("swupdate")
+                .args(["-u", bundle_path])
+                .output()
+                .map_err(|e| UpdateError::Other(format!("swupdate spawn: {e}")));
+            match out {
+                Ok(o) if o.status.success() => {}
+                Ok(o) => {
+                    return Err(UpdateError::Other(format!(
+                        "swupdate failed: {}",
+                        String::from_utf8_lossy(&o.stderr)
+                    )));
+                }
+                Err(e) => return Err(UpdateError::Other(format!("swupdate spawn: {e}"))),
+            }
+        }
+        on_progress(InstallProgress {
+            stage: InstallStage::Done,
+            percent: 100,
+            message: "done".into(),
+        });
+        Ok(())
+    }
+
+    fn reboot_to_apply(&self) -> Result<(), UpdateError> {
+        // OS-016: the reboot must carry the firmware tryboot flag so the new
+        // slot boots once via boot_prefix_try and firmware-level rollback
+        // protects the device if the new slot panics.
+        crate::applier::run_cmd(
+            "systemctl",
+            &["reboot", "--reboot-argument=0 tryboot"],
+        )
+        .map_err(|e| UpdateError::Other(e.to_string()))?;
+        Ok(())
+    }
+
+    fn mark_good(&self) -> Result<(), UpdateError> {
+        // Tryboot manual confirmation (mirrors swupdate-bootcheck's automatic
+        // confirm): make the running slot's boot_prefix permanent and clear
+        // any pending boot_prefix_try / boot_state.
+        let running = Self::running_slot()
+            .ok_or_else(|| UpdateError::Other("no A/B layout to confirm".into()))?;
+        let dir = running.to_uppercase();
+        let cmdline = std::fs::read_to_string("/boot/cmdline.txt");
+        if cmdline.is_err() {
+            // Not a tryboot-managed /boot (pre-OS-016 image): nothing to mark.
+            return Ok(());
+        }
+        let autoboot = format!("[all]\nboot_prefix={dir}/\n");
+        Self::atomic_write("/boot/autoboot.txt", &autoboot)?;
+        if let Some(state) = Self::boot_state() {
+            if state.get("slot").map(String::as_str) == Some(running.as_str()) {
+                let _ = std::fs::remove_file("/boot/boot_state");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Split a sw-description body into lines (helper kept tiny for testing).
+fn desc_lines(desc: &str) -> impl Iterator<Item = &str> {
+    desc.lines()
+}
+
 /// Strip one layer of matching surrounding single quotes — RAUC's `rauc
 /// info` text output quotes string values (e.g. `Compatible:  'acadia'`).
 fn unquote(s: &str) -> String {
