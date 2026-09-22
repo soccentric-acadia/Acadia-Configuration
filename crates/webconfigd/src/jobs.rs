@@ -11,6 +11,28 @@ use crate::alert_dispatch::dispatch_event;
 use crate::bootstrap;
 use crate::engine_bridge::EngineBridge;
 
+/// CLOCK_MONOTONIC-domain nanoseconds (ns since boot) — the timeline the
+/// Instrumentation contract fixes for `TimeStamp.mono_ns`/`Heartbeat.mono_ns`
+/// (common.proto: "CLOCK_MONOTONIC, ns since boot"). istate compares this
+/// value against its own monotonic clock for staleness, so a wall-clock stamp
+/// reads as "in the future" and renders the configuration peer permanently
+/// unresponsive (task 009, finding C1).
+///
+/// Sourced from `/proc/uptime` (always mounted on the target; std-only, the
+/// crate forbids `unsafe`). The first field is seconds since boot with
+/// centisecond resolution — ample for a peer-heartbeat staleness window.
+fn monotonic_now_ns() -> u64 {
+    match std::fs::read_to_string("/proc/uptime") {
+        Ok(text) => text
+            .split_whitespace()
+            .next()
+            .and_then(|uptime_s| uptime_s.parse::<f64>().ok())
+            .map(|secs| (secs * 1e9) as u64)
+            .unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
 /// Heartbeat to istate on the shared peer cadence (Instrumentation §3.1).
 ///
 /// istate records the last heartbeat of every peer and Configuration's peer
@@ -23,10 +45,7 @@ pub(crate) async fn run_istate_heartbeat(client: crate::istate_client::SharedIst
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
         sequence = sequence.wrapping_add(1);
-        let now_ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
+        let now_ns = monotonic_now_ns();
         // HEALTH_PASS = 0 in instr.common.proto; the generated type is the raw
         // enum integer, so pass the constant directly.
         let hb = crate::istate_client::pb::common::Heartbeat {

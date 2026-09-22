@@ -785,7 +785,7 @@ fn map_upd(e: webconfig_engine::update::UpdateError) -> ApiError {
 /// schema declares `field_type: "secret"` (spec §3: `secret` is a first-class,
 /// schema-declared field type — any app can define one, not just the fields
 /// baked into this struct).
-fn redact_secrets(cfg: &mut webconfig_engine::Config, schema: &webconfig_engine::schema::Schema) {
+pub(crate) fn redact_secrets(cfg: &mut webconfig_engine::Config, schema: &webconfig_engine::schema::Schema) {
     const REDACTED: &str = "[redacted]";
 
     // Wi-Fi PSKs.

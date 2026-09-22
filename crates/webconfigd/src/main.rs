@@ -14,6 +14,7 @@ mod bootstrap;
 mod csrf;
 mod engine_bridge;
 mod error;
+mod hq_bridge;
 mod hq_command_handler;
 mod istate_client;
 mod jobs;
@@ -72,14 +73,45 @@ async fn main() -> anyhow::Result<()> {
     // the agent until re-provisioning. Runs on this daemon's runtime — no
     // extra process (spec §2: exactly one daemon).
     let (agent_stop, agent_stop_rx) = tokio::sync::watch::channel(false);
+    // Data-plane plumbing (task 009 P2/P3): local execution of the
+    // `configuration` pseudo-daemon verbs, the upload coordinator/executor,
+    // and the istate→AgentLink data bridge.
+    let (mailbox, pub_rx) = hq_agent::mailbox_channel();
+    let uploads = Arc::new(hq_bridge::UploadCoordinator::new());
+    let ops = Arc::new(hq_bridge::DeviceOps {
+        engine: engine.clone(),
+        update_backend: state.update_backend.clone(),
+        schema: state.schema.clone(),
+        istate: state.istate.clone(),
+        coordinator: uploads.clone(),
+        sysroot: state.engine.sysroot.clone(),
+    });
+    let mailbox_for_agent = mailbox.clone();
+    let bridge_stop = agent_stop_rx.clone();
     tokio::spawn(hq_agent::run_agent(
-        pairing,
+        pairing.clone(),
         hq_agent::GrpcConnector::default(),
-        hq_agent::IdempotentCommandHandler::new(hq_command_handler::IstateCommandHandler::new(
-            state.istate.clone(),
-            state.audit.clone(),
-        )),
+        hq_agent::IdempotentCommandHandler::new(
+            hq_command_handler::IstateCommandHandler::new(
+                state.istate.clone(),
+                state.audit.clone(),
+                ops.clone(),
+                mailbox_for_agent,
+            ),
+        ),
+        hq_bridge::UploadExecutor {
+            coordinator: uploads,
+            audit: state.audit.clone(),
+        },
+        pub_rx,
         agent_stop_rx,
+    ));
+    // Device→HQ data bridge: istate spooled records → AgentLink frames.
+    tokio::spawn(hq_bridge::run_data_bridge(
+        ops,
+        pairing,
+        mailbox,
+        bridge_stop,
     ));
     // Ensure the loop stops cleanly when main exits (process death covers the
     // daemon case; the watch is for tests and future graceful shutdown).

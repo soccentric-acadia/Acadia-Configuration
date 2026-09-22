@@ -46,6 +46,8 @@ async fn main() {
         agent.clone(),
         hq_agent::GrpcConnector::default(),
         hq_agent::NullCommandHandler,
+        (),
+        hq_agent::mailbox_channel().1,
         stop_rx,
     ));
 

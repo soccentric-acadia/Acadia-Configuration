@@ -324,7 +324,39 @@ pub async fn factory_reset(
     }
     let user = username(&session).await;
     audit(&app, &user, "system.factory-reset", Some(req.mode.clone()));
-    let dir = app.engine.sysroot.webconfig_dir();
+    let failures = factory_reset_core(&app.engine.sysroot, &req.mode);
+
+    // A partial failure means the device is in an unknown, possibly
+    // inconsistent state — rebooting it now would present that as a clean
+    // reset. Skip the reboot and report the failure explicitly instead
+    // (Checkpoint 1.6).
+    if !failures.is_empty() {
+        tracing::error!(
+            failures = failures.join("; "),
+            "factory reset completed with errors — reboot skipped"
+        );
+        return Ok(Json(serde_json::json!({
+            "factory_reset": false,
+            "mode": req.mode,
+            "partial": true,
+            "errors": failures,
+        })));
+    }
+
+    if app.engine.sysroot.is_real_root() {
+        let _ = webconfig_engine::applier::run_cmd("systemctl", &["reboot"]);
+    }
+    Ok(Json(
+        serde_json::json!({ "factory_reset": true, "mode": req.mode }),
+    ))
+}
+
+/// The wipe itself, shared by the web API handler and the HQ command
+/// executor (task 009: one implementation, one behavior). Returns the real
+/// failures encountered; an empty list means the wipe completed cleanly.
+/// Rebooting and audit are the caller's concern.
+pub(crate) fn factory_reset_core(sysroot: &webconfig_engine::Sysroot, mode: &str) -> Vec<String> {
+    let dir = sysroot.webconfig_dir();
     let mut failures: Vec<String> = Vec::new();
     if dir.exists() {
         // Settings only: reset the SQLite config and audit tables but keep users.
@@ -360,7 +392,7 @@ pub async fn factory_reset(
         remove_file_best_effort(&dir.join("cert.pem"), &mut failures);
         remove_file_best_effort(&dir.join("key.pem"), &mut failures);
         remove_dir_best_effort(&dir.join("certs"), &mut failures);
-        if req.mode == "settings+users" {
+        if mode == "settings+users" {
             match rusqlite::Connection::open(&database) {
                 Ok(conn) => {
                     exec_best_effort(&conn, "DELETE FROM group_members", &mut failures);
@@ -375,30 +407,7 @@ pub async fn factory_reset(
             remove_file_best_effort(&dir.join("users.json"), &mut failures);
         }
     }
-
-    // A partial failure means the device is in an unknown, possibly
-    // inconsistent state — rebooting it now would present that as a clean
-    // reset. Skip the reboot and report the failure explicitly instead
-    // (Checkpoint 1.6).
-    if !failures.is_empty() {
-        tracing::error!(
-            failures = failures.join("; "),
-            "factory reset completed with errors — reboot skipped"
-        );
-        return Ok(Json(serde_json::json!({
-            "factory_reset": false,
-            "mode": req.mode,
-            "partial": true,
-            "errors": failures,
-        })));
-    }
-
-    if app.engine.sysroot.is_real_root() {
-        let _ = webconfig_engine::applier::run_cmd("systemctl", &["reboot"]);
-    }
-    Ok(Json(
-        serde_json::json!({ "factory_reset": true, "mode": req.mode }),
-    ))
+    failures
 }
 
 /// Run a best-effort `DELETE`, logging and recording a real failure — but

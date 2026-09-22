@@ -71,7 +71,65 @@ pub trait AgentConnector: Send + Sync + 'static {
 /// operations (factory reset etc.) — X5-027/028.
 #[async_trait::async_trait]
 pub trait CommandHandler: Send + Sync + 'static {
-    async fn handle(&self, command: pb::Command) -> (bool, String);
+    async fn handle(&self, command: pb::Command) -> CommandOutcome;
+}
+
+/// Hooks for server frames the agent loop does not interpret itself.
+///
+/// `SignedUploadUrl` answers a device-issued `LogUploadRequest` (log bundle /
+/// backup blob upload, X5-024): the device fetches bulk bytes itself and PUTs
+/// them to the presigned URL. The agent stays transport-only; the device
+/// implements the actual upload (task 009, H7).
+#[async_trait::async_trait]
+pub trait ServerFrameHooks: Send + Sync + 'static {
+    async fn on_signed_upload_url(&self, url: pb::SignedUploadUrl) {
+        let _ = url;
+    }
+}
+
+/// No-op hooks for callers/tests that do not implement uploads.
+#[async_trait::async_trait]
+impl ServerFrameHooks for ()
+{
+    async fn on_signed_upload_url(&self, _url: pb::SignedUploadUrl) {}
+}
+
+/// The full result of executing one HQ command (task 009, H1).
+///
+/// The gateway reads `json_payload` into the durable command record's
+/// `result_payload` and keeps `error` only on failure — a handler that
+/// collapses everything into the old `(bool, String)` pair lost successful
+/// results (e.g. a `configuration.read` answer) entirely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandOutcome {
+    pub success: bool,
+    /// Machine-readable status code ("OK" on success).
+    pub code: String,
+    /// Human-readable failure detail; empty on success.
+    pub message: String,
+    /// JSON result data (stringified) returned to HQ on success.
+    pub json_payload: String,
+}
+
+impl CommandOutcome {
+    /// Successful outcome with a JSON payload.
+    pub fn ok_json(code: impl Into<String>, json_payload: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            code: code.into(),
+            message: String::new(),
+            json_payload: json_payload.into(),
+        }
+    }
+    /// Structured failure.
+    pub fn failure(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            code: code.into(),
+            message: message.into(),
+            json_payload: String::new(),
+        }
+    }
 }
 
 /// Adds device-side at-most-once behavior to any command implementation.
@@ -79,7 +137,7 @@ pub trait CommandHandler: Send + Sync + 'static {
 /// the agent retain unbounded command history.
 pub struct IdempotentCommandHandler<H> {
     inner: H,
-    completed: Mutex<HashMap<String, (bool, String)>>,
+    completed: Mutex<HashMap<String, CommandOutcome>>,
     capacity: usize,
 }
 
@@ -100,7 +158,7 @@ impl<H> IdempotentCommandHandler<H> {
 
 #[async_trait::async_trait]
 impl<H: CommandHandler> CommandHandler for IdempotentCommandHandler<H> {
-    async fn handle(&self, command: pb::Command) -> (bool, String) {
+    async fn handle(&self, command: pb::Command) -> CommandOutcome {
         let key = if command.idempotency_key.is_empty() {
             command.command_id.clone()
         } else {
@@ -128,13 +186,10 @@ pub struct NullCommandHandler;
 
 #[async_trait::async_trait]
 impl CommandHandler for NullCommandHandler {
-    async fn handle(&self, command: pb::Command) -> (bool, String) {
-        (
-            false,
-            format!(
-                "command {} not implemented on this agent",
-                command.command_id
-            ),
+    async fn handle(&self, command: pb::Command) -> CommandOutcome {
+        CommandOutcome::failure(
+            "NOT_IMPLEMENTED",
+            format!("command {} not implemented on this agent", command.command_id),
         )
     }
 }
@@ -229,15 +284,17 @@ fn first_frame(agent: &PairingAgent) -> Result<Option<pb::AgentFrame>, AgentErro
 
 /// Handle one ServerFrame. Returns true when the caller should close this
 /// session (pairing complete → reconnect as Enrolled).
-async fn handle_server_frame<H, S>(
+async fn handle_server_frame<H, S, U>(
     agent: &Arc<std::sync::Mutex<PairingAgent>>,
     session: &mut S,
     frame: pb::ServerFrame,
     handler: &H,
+    hooks: &U,
     heartbeat_interval: &mut i64,
 ) -> bool
 where
     H: CommandHandler,
+    U: ServerFrameHooks,
     S: AgentSession + ?Sized,
 {
     match frame.body {
@@ -290,15 +347,7 @@ where
         }
         Some(pb::server_frame::Body::Command(command)) => {
             let accepted_at_mono_ns = monotonic_now_ns();
-            let (success, error) = handler.handle(command.clone()).await;
-            let code = if success {
-                "OK".into()
-            } else {
-                error
-                    .split_once(':')
-                    .map(|(code, _)| code.to_string())
-                    .unwrap_or_else(|| "INTERNAL".into())
-            };
+            let outcome = handler.handle(command.clone()).await;
             let correlation_id = if command.correlation_id.is_empty() {
                 command.command_id.clone()
             } else {
@@ -307,12 +356,19 @@ where
             let ack = pb::AgentFrame {
                 body: Some(pb::agent_frame::Body::CommandAck(pb::CommandAck {
                     command_id: command.command_id,
-                    success,
-                    error,
+                    success: outcome.success,
+                    // Failure detail only: the gateway stores json_payload as
+                    // the durable result; a payload smuggled through `error`
+                    // was discarded on success (task 009, H1).
+                    error: if outcome.success {
+                        String::new()
+                    } else {
+                        outcome.message.clone()
+                    },
                     daemon: command.daemon,
                     operation: command.operation,
-                    code,
-                    json_payload: String::new(),
+                    code: outcome.code,
+                    json_payload: outcome.json_payload,
                     correlation_id,
                     accepted_at_mono_ns,
                     completed_at_mono_ns: monotonic_now_ns(),
@@ -326,10 +382,9 @@ where
             false
         }
         Some(pb::server_frame::Body::SignedUploadUrl(url)) => {
-            tracing::debug!(
-                "signed upload url for request {} (log/backup flow, X5-024)",
-                url.request_ref
-            );
+            // Forwarded to the device's upload executor (task 009, H7); the
+            // agent itself never interprets the URL.
+            hooks.on_signed_upload_url(url).await;
             false
         }
         None => false,
@@ -463,20 +518,56 @@ impl AgentConnector for GrpcConnector {
     }
 }
 
+/// Handle for other components (the device→HQ data-plane bridge) to enqueue
+/// frames on the agent's live AgentLink session (task 009, P3.2).
+///
+/// Bounded buffer: while the agent is offline or saturated, `try_publish`
+/// reports rejection instead of blocking — the istate northbound spool stays
+/// the durability layer, and the gateway tolerates telemetry gaps.
+/// Frames buffered between sessions are flushed on the next connect.
+#[derive(Clone)]
+pub struct AgentMailbox {
+    tx: mpsc::Sender<pb::AgentFrame>,
+}
+
+impl AgentMailbox {
+    /// Enqueue a frame for the current/next enrolled session. Non-blocking;
+    /// returns false when the agent has no capacity (offline or saturated).
+    /// Callers must only publish while the pairing state is Enrolled — the
+    /// agent re-checks the state before sending.
+    pub fn try_publish(&self, frame: pb::AgentFrame) -> bool {
+        self.tx.try_send(frame).is_ok()
+    }
+}
+
+/// Create the data-plane mailbox pair: the caller keeps the
+/// [`AgentMailbox`], and passes the receiver to [`run_agent`]. Created outside
+/// the loop so other components can hold the mailbox before the agent's first
+/// session opens.
+pub fn mailbox_channel() -> (AgentMailbox, mpsc::Receiver<pb::AgentFrame>) {
+    let (tx, rx) = mpsc::channel::<pb::AgentFrame>(256);
+    (AgentMailbox { tx }, rx)
+}
+
 /// Run the connect/heartbeat/retry loop until `shutdown` fires. Never returns
 /// early on transport errors — every failure goes through the pairing agent's
-/// bounded backoff and the loop reconnects.
+/// bounded backoff and the loop reconnects. Returns the mailbox other
+/// components publish data-plane frames through.
 ///
 /// Lock discipline: `agent` is a std mutex shared with the HTTP layer; the
 /// loop only holds it for state reads/writes, never across an await.
-pub async fn run_agent<C, H>(
+pub async fn run_agent<C, H, U>(
     agent: Arc<std::sync::Mutex<PairingAgent>>,
     connector: C,
     handler: H,
+    hooks: U,
+    mut pub_rx: mpsc::Receiver<pb::AgentFrame>,
     mut shutdown: watch::Receiver<bool>,
-) where
+)
+where
     C: AgentConnector,
     H: CommandHandler,
+    U: ServerFrameHooks,
 {
     #[derive(Debug)]
     enum Next {
@@ -557,6 +648,25 @@ pub async fn run_agent<C, H>(
                     tokio::select! {
                         _ = shutdown.changed() => return,
 
+                        maybe_frame = pub_rx.recv() => {
+                            // Data-plane frame from the bridge. Only enrolled
+                            // sessions carry data frames: the gateway drops a
+                            // session whose device row it cannot resolve, so
+                            // publishing during pairing/revocation would kill
+                            // the stream. Dropped here, retried by the spool
+                            // replay on the next subscription.
+                            if let Some(frame) = maybe_frame {
+                                let enrolled = agent.lock().unwrap().state() == PairingState::Enrolled;
+                                if !enrolled {
+                                    tracing::debug!("agent: dropping published frame while not enrolled");
+                                } else if let Err(e) = session.send(frame).await {
+                                    tracing::warn!("agent: published frame send failed: {e}");
+                                    break;
+                                }
+                            }
+                            // None = mailbox closed: the agent outlives it; keep polling.
+                        }
+
                         _ = ticker.tick() => {
                             // Credential on every frame (contract §Enrollment).
                             let frame = {
@@ -604,6 +714,7 @@ pub async fn run_agent<C, H>(
                                         &mut *session,
                                         frame,
                                         &handler,
+                                        &hooks,
                                         &mut heartbeat_interval,
                                     )
                                     .await;
@@ -750,7 +861,7 @@ mod tests {
         let (conn, _session) =
             MockConnector::with_session(VecDeque::from([Ok(pairing_result(true))]));
         let (tx, rx) = watch::channel(false);
-        let handle = tokio::spawn(run_agent(agent.clone(), conn, NullCommandHandler, rx));
+        let handle = tokio::spawn(run_agent(agent.clone(), conn, NullCommandHandler, (), mailbox_channel().1, rx));
         tokio::time::sleep(Duration::from_millis(400)).await;
         tx.send(true).unwrap();
         handle.abort();
@@ -768,7 +879,7 @@ mod tests {
         let (conn, _session) =
             MockConnector::with_session(VecDeque::from([Ok(pairing_result(false))]));
         let (tx, rx) = watch::channel(false);
-        let handle = tokio::spawn(run_agent(agent.clone(), conn, NullCommandHandler, rx));
+        let handle = tokio::spawn(run_agent(agent.clone(), conn, NullCommandHandler, (), mailbox_channel().1, rx));
         tokio::time::sleep(Duration::from_millis(300)).await;
         tx.send(true).unwrap();
         handle.abort();
@@ -788,7 +899,7 @@ mod tests {
         // stream open (no more frames) so the ticker fires at least once.
         let (conn, session) = MockConnector::with_session(VecDeque::from([Ok(heartbeat_ack(1))]));
         let (tx, rx) = watch::channel(false);
-        let handle = tokio::spawn(run_agent(agent.clone(), conn, NullCommandHandler, rx));
+        let handle = tokio::spawn(run_agent(agent.clone(), conn, NullCommandHandler, (), mailbox_channel().1, rx));
         tokio::time::sleep(Duration::from_millis(1700)).await;
         tx.send(true).unwrap();
         handle.abort();
@@ -830,7 +941,7 @@ mod tests {
         let (conn, session) =
             MockConnector::with_session(VecDeque::from([Ok(command), Ok(heartbeat_ack(30))]));
         let (tx, rx) = watch::channel(false);
-        let handle = tokio::spawn(run_agent(agent.clone(), conn, NullCommandHandler, rx));
+        let handle = tokio::spawn(run_agent(agent.clone(), conn, NullCommandHandler, (), mailbox_channel().1, rx));
         tokio::time::sleep(Duration::from_millis(300)).await;
         tx.send(true).unwrap();
         handle.abort();

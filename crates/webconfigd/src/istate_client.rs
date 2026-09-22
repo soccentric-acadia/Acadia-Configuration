@@ -7,8 +7,21 @@ use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
 pub mod pb {
+    /// The full Instrumentation contract tree: istate.proto references
+    /// telemetry/faults/logmanager types (DeviceFrame payloads, StreamLogs
+    /// TailLine), so all five packages must be generated and mounted as
+    /// siblings under `instr` for the cross-references to resolve.
     pub mod common {
         tonic::include_proto!("instr.common");
+    }
+    pub mod telemetry {
+        tonic::include_proto!("instr.telemetry");
+    }
+    pub mod faults {
+        tonic::include_proto!("instr.faults");
+    }
+    pub mod logmanager {
+        tonic::include_proto!("instr.logmanager");
     }
     pub mod istate {
         tonic::include_proto!("instr.istate");
@@ -58,6 +71,29 @@ pub trait IstateClient: Send + Sync + 'static {
         Err(IstateError::Unavailable)
     }
     async fn status(&self) -> Result<serde_json::Value, IstateError> {
+        Err(IstateError::Unavailable)
+    }
+    /// Subscribe to istate's spooled northbound data (Instrumentation
+    /// `ConfigurationApi.StreamDeviceData`): the device→HQ data plane. The
+    /// returned stream yields replayed-then-live records; the caller maps
+    /// them onto AgentLink frames (task 009, H6).
+    async fn stream_device_data(
+        &self,
+        classes: Vec<String>,
+        since_mono_ns: u64,
+    ) -> Result<tonic::codec::Streaming<pb::common::RelayedData>, IstateError> {
+        let _ = (classes, since_mono_ns);
+        Err(IstateError::Unavailable)
+    }
+    /// Full-coverage relay to a spoke (istate `RelayCommand`): used by the
+    /// log-bundle upload path to fetch bundle metadata/handles (task 009, H7).
+    async fn relay_command(
+        &self,
+        daemon: String,
+        op: String,
+        json_args: String,
+    ) -> Result<serde_json::Value, IstateError> {
+        let _ = (daemon, op, json_args);
         Err(IstateError::Unavailable)
     }
 }
@@ -178,10 +214,63 @@ impl IstateClient for GrpcIstateClient {
             .into_inner();
         Ok(
             serde_json::json!({"reachable": true, "peers": peers.peers.into_iter().map(|p| serde_json::json!({
-                "peer": p.peer, "connected": p.connected, "operational": p.operational,
+                "peer": p.peer, "kind": peer_kind_name(p.kind), "connected": p.connected, "operational": p.operational,
                 "state": p.state, "detail": p.detail
             })).collect::<Vec<_>>() }),
         )
+    }
+
+    async fn stream_device_data(
+        &self,
+        classes: Vec<String>,
+        since_mono_ns: u64,
+    ) -> Result<tonic::codec::Streaming<pb::common::RelayedData>, IstateError> {
+        let rpc = pb::istate::DataStreamSpec {
+            classes,
+            since_mono_ns,
+        };
+        let stream = self
+            .client
+            .lock()
+            .await
+            .stream_device_data(rpc)
+            .await
+            .map_err(|_| IstateError::Transport)?
+            .into_inner();
+        Ok(stream)
+    }
+
+    async fn relay_command(
+        &self,
+        daemon: String,
+        op: String,
+        json_args: String,
+    ) -> Result<serde_json::Value, IstateError> {
+        let rpc = pb::istate::RelayRequest {
+            daemon,
+            command: Some(pb::common::Command {
+                op,
+                json_args,
+                issued_by: "configuration".into(),
+                ..Default::default()
+            }),
+        };
+        let reply = self
+            .client
+            .lock()
+            .await
+            .relay_command(rpc)
+            .await
+            .map_err(|_| IstateError::Transport)?
+            .into_inner();
+        if !reply.ok {
+            return Err(IstateError::Remote {
+                code: reply.code,
+                message: reply.message,
+            });
+        }
+        Ok(serde_json::from_str::<serde_json::Value>(&reply.json_payload)
+            .unwrap_or_else(|_| serde_json::json!({})))
     }
 
     async fn heartbeat(&self, hb: pb::common::Heartbeat) -> Result<pb::common::HeartbeatAck, IstateError> {
@@ -193,6 +282,16 @@ impl IstateClient for GrpcIstateClient {
             .await
             .map_err(|_| IstateError::Transport)?
             .into_inner())
+    }
+}
+
+/// @brief Human-readable name for a `common.PeerKind` value (proto enum as i32).
+fn peer_kind_name(kind: i32) -> &'static str {
+    match kind {
+        0 => "spoke",
+        1 => "configuration",
+        2 => "hq",
+        _ => "unknown",
     }
 }
 
