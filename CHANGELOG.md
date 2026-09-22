@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-09-21 — Cross-repo API surface audit: webconfigd contract consumption (task 009)
+
+### Added
+
+- Verbatim proto contract copies for telemetry, faults, and logmanager
+  synced from Acadia-Instrumentation; new `hq_bridge` for HQ command
+  forwarding; extended istate_client, jobs, and system/updates APIs
+  against the new surface.
+- New `proto_contract` integration test pinning the webconfigd protos
+  against the Instrumentation contract sources.
+
 ## 2026-09-21 — istate peer heartbeat (Instrumentation §3.1)
 
 ### Added
