@@ -16,23 +16,38 @@
     {
       "id": "ttyAMA0",
       "device": "/dev/ttyAMA0",
-      "human_name": "PL011 UART",
+      "human_name": "RS-485 / RS-232 (GPIO14/15, RP1 UART0)",
       "kind": "serial",
-      "caps": { "modes": ["rs232"] }
+      "caps": {
+        "modes": [
+          "rs232",
+          "rs485"
+        ],
+        "owner": "hal_rs485"
+      }
     },
     {
-      "id": "ttyS0",
-      "device": "/dev/ttyS0",
-      "human_name": "Mini UART 0",
+      "id": "ttyAMA2",
+      "device": "/dev/ttyAMA2",
+      "human_name": "Pico W co-processor link (RP1 UART2, GPIO0/1)",
       "kind": "serial",
-      "caps": { "modes": ["rs232"] }
+      "caps": {
+        "modes": [
+          "rs232"
+        ],
+        "owner": "pico_link",
+        "hil_verify": "uart2 overlay device node"
+      }
     },
     {
       "id": "can0",
       "device": "can0",
       "human_name": "CAN channel 0 (SPI HAT)",
       "kind": "can",
-      "caps": { "fd": true, "termination_gpio": "gpio-can0-term" }
+      "caps": {
+        "fd": false,
+        "termination_gpio": "gpio-can0-term"
+      }
     },
     {
       "id": "i2c-1",
@@ -60,21 +75,31 @@
       "device": "gpiochip4 line 6",
       "human_name": "System status LED",
       "kind": "gpio",
-      "caps": { "direction": "out", "active_low": false, "function": "led", "role": "system" }
+      "caps": {
+        "direction": "out",
+        "active_low": false,
+        "function": "led",
+        "role": "system"
+      }
     },
     {
       "id": "gpio-btn-recovery",
       "device": "gpiochip4 line 7",
       "human_name": "Recovery button",
       "kind": "gpio",
-      "caps": { "direction": "in", "active_low": true }
+      "caps": {
+        "direction": "in",
+        "active_low": true
+      }
     },
     {
       "id": "gpio-can0-term",
       "device": "gpiochip4 line 9",
       "human_name": "CAN0 termination",
       "kind": "gpio",
-      "caps": { "direction": "out" }
+      "caps": {
+        "direction": "out"
+      }
     },
     {
       "id": "mcu-pico",
@@ -102,7 +127,9 @@
       "device": "/sys/class/thermal/thermal_zone0",
       "human_name": "SoC thermal zone",
       "kind": "thermal",
-      "caps": { "throttle": true }
+      "caps": {
+        "throttle": true
+      }
     },
     {
       "id": "eth0",
@@ -116,7 +143,9 @@
       "device": "wlan0",
       "human_name": "Wi-Fi",
       "kind": "net",
-      "caps": { "ap": true }
+      "caps": {
+        "ap": true
+      }
     }
   ],
   "wifi_radio": {
@@ -125,15 +154,88 @@
     "channel": 7
   },
   "dashboard_tiles": [
-    { "id": "cpu", "title": "CPU utilization", "metrics": ["cpu.util"], "render": "sparkline" },
-    { "id": "thermal", "title": "Thermal / throttle", "metrics": ["thermal.temp", "temp.throttled"], "render": "state" },
-    { "id": "mcu", "title": "Pico W heartbeat", "metrics": ["mcu.heartbeat", "mcu.fw_version"], "render": "state" },
-    { "id": "clock", "title": "Clock frequency", "metrics": ["cpu.freq"], "render": "value" }
+    {
+      "id": "cpu",
+      "title": "CPU utilization",
+      "metrics": [
+        "cpu.util"
+      ],
+      "render": "sparkline"
+    },
+    {
+      "id": "thermal",
+      "title": "Thermal / throttle",
+      "metrics": [
+        "thermal.temp",
+        "temp.throttled"
+      ],
+      "render": "state"
+    },
+    {
+      "id": "mcu",
+      "title": "Pico W heartbeat",
+      "metrics": [
+        "mcu.heartbeat",
+        "mcu.fw_version"
+      ],
+      "render": "state"
+    },
+    {
+      "id": "clock",
+      "title": "Clock frequency",
+      "metrics": [
+        "cpu.freq"
+      ],
+      "render": "value"
+    }
   ],
   "default_alert_rules": [
-    { "id": "disk-full", "enabled": true, "metric": "disk.pct", "comparison": ">", "threshold": 90, "duration_secs": 60, "actions": ["ui"] },
-    { "id": "watchdog-reset", "enabled": true, "metric": "boot.watchdog", "comparison": ">", "threshold": 0, "duration_secs": 0, "actions": ["ui"] },
-    { "id": "throttling", "enabled": true, "metric": "temp.throttled", "comparison": ">", "threshold": 0, "duration_secs": 30, "actions": ["ui"] },
-    { "id": "cert-expiry", "enabled": true, "metric": "cert.*", "comparison": "<", "threshold": 30, "duration_secs": 0, "actions": ["ui"] }
-  ]
+    {
+      "id": "disk-full",
+      "enabled": true,
+      "metric": "disk.pct",
+      "comparison": ">",
+      "threshold": 90,
+      "duration_secs": 60,
+      "actions": [
+        "ui"
+      ]
+    },
+    {
+      "id": "watchdog-reset",
+      "enabled": true,
+      "metric": "boot.watchdog",
+      "comparison": ">",
+      "threshold": 0,
+      "duration_secs": 0,
+      "actions": [
+        "ui"
+      ]
+    },
+    {
+      "id": "throttling",
+      "enabled": true,
+      "metric": "temp.throttled",
+      "comparison": ">",
+      "threshold": 0,
+      "duration_secs": 30,
+      "actions": [
+        "ui"
+      ]
+    },
+    {
+      "id": "cert-expiry",
+      "enabled": true,
+      "metric": "cert.*",
+      "comparison": "<",
+      "threshold": 30,
+      "duration_secs": 0,
+      "actions": [
+        "ui"
+      ]
+    }
+  ],
+  "meta": {
+    "uart_allocation_authority": "Acadia-Hardware doc/uart-allocation.md (pin-map rev-c, T-P15)"
+  }
 }
