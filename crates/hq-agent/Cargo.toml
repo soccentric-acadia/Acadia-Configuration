@@ -10,7 +10,9 @@ description = "Device-side Acadia-HQ AgentLink gRPC client: pairing handshake, h
 
 [dependencies]
 webconfig-engine = { path = "../webconfig-engine" }
-tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
+# T-P12 (F10): the transport features enable rustls dialing (tls) and
+# native root certificates (tls-roots) for the https:// AgentLink path.
+tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost", "tls", "tls-roots"] }
 prost = { version = "0.13", default-features = false, features = ["std", "derive"] }
 tokio = { workspace = true }
 tokio-stream = { version = "0.1", default-features = false, features = ["time"] }

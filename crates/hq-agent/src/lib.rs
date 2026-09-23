@@ -466,18 +466,68 @@ impl AgentSession for GrpcSession {
     }
 }
 
+impl GrpcConnector {
+    /// Resolve the dial URI for an AgentLink endpoint (T-P12, F10).
+    ///
+    /// Secure by default: a bare `host:port` (the pairing-UI provisioning
+    /// shape) dials `https://` — the gateway serves TLS (gateway/server.py)
+    /// with the HQ CA pinned at `/etc/acadia/hq-ca.pem` (provisioned with the
+    /// endpoint, P-A10). An explicit scheme is honored: `http://` stays
+    /// available for plaintext dev deployments, `https://` is explicit TLS.
+    ///
+    /// Optional mTLS: when the device carries an AgentLink client identity
+    /// (`/pst/webconfig/hq-client-{cert,key}.pem`), it presents it — paired
+    /// with the gateway's `tls_client_ca_path`.
+    pub fn normalize_endpoint(endpoint: &str) -> String {
+        if endpoint.contains("://") {
+            endpoint.to_string()
+        } else {
+            format!("https://{endpoint}")
+        }
+    }
+
+    async fn dial(
+        endpoint: &str,
+        connect_timeout: std::time::Duration,
+    ) -> Result<tonic::transport::Channel, AgentError> {
+        let uri = Self::normalize_endpoint(endpoint);
+        let mut ep = tonic::transport::Endpoint::from_shared(uri.clone())
+            .map_err(|e| AgentError::Connect(e.to_string()))?
+            .connect_timeout(connect_timeout);
+        if uri.starts_with("https://") {
+            // Pinned HQ CA first (provisioned, P-A10); the native root store
+            // (tls-roots feature) covers publicly-trusted gateway certs.
+            let mut tls = tonic::transport::ClientTlsConfig::new().with_enabled_roots();
+            if let Ok(ca) = std::fs::read(HQ_CA_PATH) {
+                tls = tls.ca_certificate(tonic::transport::Certificate::from_pem(ca));
+            }
+            // Optional mTLS identity (factory-issued client certificate).
+            if let (Ok(cert), Ok(key)) = (
+                std::fs::read(HQ_CLIENT_CERT_PATH),
+                std::fs::read(HQ_CLIENT_KEY_PATH),
+            ) {
+                tls = tls.identity(tonic::transport::Identity::from_pem(cert, key));
+            }
+            ep = ep
+                .tls_config(tls)
+                .map_err(|e| AgentError::Connect(e.to_string()))?;
+        }
+        ep.connect()
+            .await
+            .map_err(|e| AgentError::Connect(e.to_string()))
+    }
+}
+
+/// Pinned HQ CA for AgentLink TLS verification (provisioned, P-A10).
+const HQ_CA_PATH: &str = "/etc/acadia/hq-ca.pem";
+/// Optional mTLS device identity for AgentLink (factory-issued, T-P12).
+const HQ_CLIENT_CERT_PATH: &str = "/pst/webconfig/hq-client-cert.pem";
+const HQ_CLIENT_KEY_PATH: &str = "/pst/webconfig/hq-client-key.pem";
+
 #[async_trait::async_trait]
 impl AgentConnector for GrpcConnector {
     async fn connect(&self, endpoint: &str) -> Result<Box<dyn AgentSession>, AgentError> {
-        // Plaintext today: the HQ gateway serves insecure gRPC with TLS
-        // terminated at a reverse proxy (see gateway/server.py). TLS dialing
-        // is an X9-002 follow-up behind the same trait.
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://{endpoint}"))
-            .map_err(|e| AgentError::Connect(e.to_string()))?
-            .connect_timeout(self.connect_timeout)
-            .connect()
-            .await
-            .map_err(|e| AgentError::Connect(e.to_string()))?;
+        let channel = Self::dial(endpoint, self.connect_timeout).await?;
 
         // The request half of the bidi stream: frames we send upstream.
         // ReceiverStream bridges tokio's channel to the futures Stream the
@@ -746,6 +796,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-P12 (F10): secure by default — bare host:port dials https://; an
+    /// explicit scheme is honored (http:// dev, https:// prod).
+    #[test]
+    fn normalize_endpoint_is_secure_by_default() {
+        assert_eq!(GrpcConnector::normalize_endpoint("hq.example:50051"), "https://hq.example:50051");
+        assert_eq!(GrpcConnector::normalize_endpoint("https://hq.example:50051"), "https://hq.example:50051");
+        assert_eq!(GrpcConnector::normalize_endpoint("http://hq-dev:50051"), "http://hq-dev:50051");
+    }
     use std::collections::VecDeque;
     use tokio::sync::Mutex as AsyncMutex;
 
