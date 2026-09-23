@@ -86,7 +86,7 @@ pub(crate) async fn serve(
                 );
                 tokio::spawn(async move {
                     loop {
-                        let (stream, _peer) = match plain_listener.accept().await {
+                        let (stream, peer) = match plain_listener.accept().await {
                             Ok(s) => s,
                             Err(e) => {
                                 tracing::warn!(error = %e, "plain http accept failed");
@@ -95,7 +95,7 @@ pub(crate) async fn serve(
                         };
                         let plain_app = plain_app.clone();
                         tokio::spawn(async move {
-                            serve_plain_connection(plain_app, stream).await;
+                            serve_plain_connection(plain_app, stream, peer).await;
                         });
                     }
                 });
@@ -111,14 +111,14 @@ pub(crate) async fn serve(
 
     let listener = TcpListener::bind(&tls_addr).await?;
     loop {
-        let (stream, _peer) = listener.accept().await?;
+        let (stream, peer) = listener.accept().await?;
         let acceptor = acceptor.clone();
         let app = app.clone();
         tokio::spawn(async move {
             let Ok(tls) = acceptor.accept(stream).await else {
                 return;
             };
-            serve_connection(app, tls).await;
+            serve_connection(app, tls, peer).await;
         });
     }
 }
@@ -174,20 +174,33 @@ fn https_redirect_location(host_header: &str, path_and_query: &str, tls_port: u1
 async fn serve_connection(
     app: Router,
     tls: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    peer: std::net::SocketAddr,
 ) {
     let io = TokioIo::new(tls);
-    let tower_service =
-        app.map_request(|req: http::Request<hyper::body::Incoming>| req.map(axum::body::Body::new));
+    // T-P10: stamp the peer address as a request extension so the per-IP
+    // login throttle (auth::ClientAddr) can key on the real source.
+    let tower_service = app
+        .map_request(move |mut req: http::Request<hyper::body::Incoming>| {
+            req.extensions_mut().insert(crate::auth::ClientAddr(peer));
+            req.map(axum::body::Body::new)
+        });
     let hyper_service = TowerToHyperService::new(tower_service);
     let _ = ConnBuilder::new(TokioExecutor::new())
         .serve_connection_with_upgrades(io, hyper_service)
         .await;
 }
 
-async fn serve_plain_connection(app: Router, stream: tokio::net::TcpStream) {
+async fn serve_plain_connection(
+    app: Router,
+    stream: tokio::net::TcpStream,
+    peer: std::net::SocketAddr,
+) {
     let io = TokioIo::new(stream);
-    let tower_service =
-        app.map_request(|req: http::Request<hyper::body::Incoming>| req.map(axum::body::Body::new));
+    let tower_service = app
+        .map_request(move |mut req: http::Request<hyper::body::Incoming>| {
+            req.extensions_mut().insert(crate::auth::ClientAddr(peer));
+            req.map(axum::body::Body::new)
+        });
     let hyper_service = TowerToHyperService::new(tower_service);
     let _ = ConnBuilder::new(TokioExecutor::new())
         .serve_connection_with_upgrades(io, hyper_service)

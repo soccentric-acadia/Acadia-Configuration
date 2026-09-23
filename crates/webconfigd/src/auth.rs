@@ -29,6 +29,45 @@ use crate::state::AppState;
 const SK_USER: &str = "username";
 const SK_ROLE: &str = "role";
 
+/// The connected peer's socket address, inserted by the server accept loops
+/// (T-P10 per-IP throttle). Absent in the in-process test harness, where the
+/// per-IP gate is simply skipped.
+#[derive(Debug, Clone, Copy)]
+pub struct ClientAddr(pub std::net::SocketAddr);
+
+/// The factory claim-code file the first-boot admin creation must quote
+/// (T-P10, P-A03): written by acadia-provision-identity next to the mirrored
+/// factory identity. `Sysroot`-joined so the fake-sysroot test path works.
+fn claim_code_path(sysroot: &webconfig_engine::Sysroot) -> std::path::PathBuf {
+    sysroot.join("/pst/webconfig/claim-code")
+}
+
+/// The provisioned claim code, if factory identity was provisioned.
+fn provisioned_claim_code(app: &AppState) -> Option<String> {
+    let path = claim_code_path(&app.engine.sysroot);
+    std::fs::read_to_string(&path)
+        .ok()
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+}
+
+/// Constant-time equality for short secret comparison (claim code).
+fn ct_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        // Still burn a comparison pass so length alone doesn't short-circuit.
+        let mut diff = 1u8;
+        for (x, y) in a.bytes().chain(std::iter::repeat(0)).zip(b.bytes().chain(std::iter::repeat(0))) {
+            diff &= !(x ^ y);
+        }
+        return diff == 0 && false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Cap on distinct usernames tracked at once. Without this, an attacker
 /// submitting many distinct (nonexistent) usernames would grow the map
 /// forever — an unbounded-memory DoS. When the cap is hit, the
@@ -45,14 +84,22 @@ struct Attempt {
     last_attempt: Instant,
 }
 
-/// Login delay state: per-username failed-attempt counter + last failure time.
+/// Login delay state: per-key failed-attempt counter + last failure time.
+/// T-P10 (B06): two instances — one keyed per-username (the classic credential
+/// stuffing throttle) and one keyed per source IP (one attacker IP can't
+/// spread guesses over unlimited usernames to bypass the username lockout).
 #[derive(Debug, Default)]
 pub struct LoginThrottle {
     attempts: Mutex<HashMap<String, Attempt>>,
 }
 
+/// Per-request hard throttle ceiling for the per-IP instance: an IP sees
+/// `IP_LOCKOUT_THRESHOLD` failed logins per lockout window before being
+/// hard-locked outright, regardless of how many usernames it rotates through.
+pub const IP_LOCKOUT_THRESHOLD: u32 = 30;
+
 /// Outcome of atomically checking and reserving a login attempt slot.
-enum AttemptDecision {
+pub enum AttemptDecision {
     /// Hard-locked; the login must be rejected without even calling
     /// `authenticate()`.
     Locked,
@@ -76,7 +123,18 @@ impl LoginThrottle {
     /// Reserving the slot up front (before authentication even runs) closes
     /// that race: the `LOCKOUT_THRESHOLD`-th concurrent caller queued behind
     /// this lock sees the prior callers' counts already applied.
-    async fn begin_attempt(&self, username: &str) -> AttemptDecision {
+    pub async fn begin_attempt(&self, key: &str) -> AttemptDecision {
+        self.begin_attempt_limited(key, LOCKOUT_THRESHOLD).await
+    }
+
+    /// Same gate with an explicit threshold (per-IP throttle uses a higher
+    /// one than the per-username lockout).
+    pub async fn begin_attempt_limited(
+        &self,
+        key: &str,
+        threshold: u32,
+    ) -> AttemptDecision {
+        let username = key;
         let mut map = self.attempts.lock().await;
         if !map.contains_key(username) && map.len() >= MAX_TRACKED_USERNAMES {
             if let Some(oldest) = map
@@ -97,7 +155,7 @@ impl LoginThrottle {
         if now.duration_since(e.last_attempt) >= LOCKOUT_DURATION {
             e.count = 0;
         }
-        if e.count >= LOCKOUT_THRESHOLD {
+        if e.count >= threshold {
             // Already locked: don't touch last_attempt, so the lockout
             // expires LOCKOUT_DURATION after the last *counted* failure
             // rather than being extended indefinitely by continued hammering.
@@ -134,8 +192,13 @@ pub async fn login(
     State(app): State<AppState>,
     throttle: State<Arc<LoginThrottle>>,
     session: Session,
-    Json(req): Json<LoginRequest>,
+    mut req: axum::extract::Request,
 ) -> ApiResult<impl IntoResponse> {
+    // Peer address is read before the body is consumed.
+    let peer: Option<ClientAddr> = req.extensions().get::<ClientAddr>().cloned();
+    use axum::extract::FromRequest;
+    let Json(req): Json<LoginRequest> = Json::from_request(req, &()).await
+        .map_err(|e| ApiError::BadRequest(e.body_text()))?;
     // First-boot gate: no users yet → login is refused; the first-boot endpoint
     // is the only way forward (spec §4.8).
     let users = app.load_users().map_err(|_| ApiError::Internal)?;
@@ -147,7 +210,34 @@ pub async fn login(
 
     // Hard lockout + incremental delay: checked and reserved atomically so
     // concurrent requests for the same username can't race past the lockout
-    // (see `LoginThrottle::begin_attempt`'s doc comment).
+    // (see `LoginThrottle::begin_attempt`'s doc comment). T-P10 (B06): the
+    // same request is also throttled per source IP — one IP can't rotate
+    // through unlimited usernames to dodge the username lockout. The IP
+    // gate runs first (cheapest), and its delay applies too.
+    if let Some(ClientAddr(addr)) = peer {
+        match app
+            .ip_throttle
+            .begin_attempt_limited(&addr.to_string(), IP_LOCKOUT_THRESHOLD)
+            .await
+        {
+            AttemptDecision::Locked => {
+                app.audit
+                    .append(&webconfig_engine::audit::AuditEntry {
+                        ts: crate::api::now_iso(),
+                        user: "ip-throttle".into(),
+                        action: "auth.login.ip-locked".into(),
+                        detail: Some(addr.to_string()),
+                    })
+                    .ok();
+                return Err(ApiError::Unauthorized);
+            }
+            AttemptDecision::Allowed { delay_ms } => {
+                if delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+    }
     let delay = match throttle.begin_attempt(&req.username).await {
         AttemptDecision::Locked => return Err(ApiError::Unauthorized),
         AttemptDecision::Allowed { delay_ms } => delay_ms,
@@ -161,6 +251,10 @@ pub async fn login(
             throttle.record_success(&req.username).await;
             session.insert(SK_USER, &req.username).await.ok();
             session.insert(SK_ROLE, role.as_str()).await.ok();
+            // T-P10 (CFG-016): rotate the session id on every authentication
+            // so a session id captured pre-login can't be replayed post-login
+            // (session fixation).
+            session.cycle_id().await.ok();
             // CSRF token is minted by the csrf layer on the next GET /auth/whoami.
             Ok(Json(LoginResponse {
                 username: req.username,
@@ -204,6 +298,13 @@ pub async fn whoami(State(app): State<AppState>, session: Session) -> ApiResult<
 pub struct FirstBootRequest {
     pub username: String,
     pub password: String,
+    /// The per-device claim code printed on the factory label (T-P10,
+    /// P-A03). Required whenever the factory record is provisioned; when no
+    /// claim code exists (dev/CI, `make run`), first-boot stays open and the
+    /// omission is audited loudly instead — a shipped device always has the
+    /// code because acadia-factory-provision runs at first boot.
+    #[serde(default)]
+    pub claim_code: Option<String>,
 }
 
 pub async fn first_boot(
@@ -220,6 +321,42 @@ pub async fn first_boot(
     if !users.needs_first_boot_admin() {
         return Err(ApiError::Conflict("first-boot already completed".into()));
     }
+
+    // T-P10 (P-A03): the first on the network does NOT become admin — the
+    // claim code from the factory label does. One-time use: consumed here so
+    // a code can never re-claim a device later.
+    let expected = provisioned_claim_code(&app);
+    match expected {
+        Some(expected) => {
+            let supplied = req.claim_code.as_deref().unwrap_or("").trim();
+            if supplied.is_empty() || !ct_eq(supplied, &expected) {
+                app.audit
+                    .append(&webconfig_engine::audit::AuditEntry {
+                        ts: crate::api::now_iso(),
+                        user: req.username.clone(),
+                        action: "auth.first-boot.claim-rejected".into(),
+                        detail: None,
+                    })
+                    .ok();
+                return Err(ApiError::Forbidden(
+                    "first-boot".into(),
+                    "claim-code mismatch — use the code printed on the device label".into(),
+                ));
+            }
+            let _ = std::fs::remove_file(claim_code_path(&app.engine.sysroot));
+        }
+        None => {
+            app.audit
+                .append(&webconfig_engine::audit::AuditEntry {
+                    ts: crate::api::now_iso(),
+                    user: req.username.clone(),
+                    action: "auth.first-boot.no-claim-code".into(),
+                    detail: Some("factory claim code not provisioned — first-boot open".into()),
+                })
+                .ok();
+        }
+    }
+
     users
         .add(&req.username, &req.password, Role::Admin)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
@@ -227,6 +364,8 @@ pub async fn first_boot(
 
     session.insert(SK_USER, &req.username).await.ok();
     session.insert(SK_ROLE, Role::Admin.as_str()).await.ok();
+    // T-P10 (CFG-016): rotate the session id after first-boot login too.
+    session.cycle_id().await.ok();
 
     app.audit
         .append(&webconfig_engine::audit::AuditEntry {
@@ -257,11 +396,35 @@ pub async fn require_auth(
     // /auth/whoami are usable. The router mounts this middleware on the
     // protected sub-router only, so first-boot is reachable.
     let username: Option<String> = session.get(SK_USER).await.ok().flatten();
-    let role: Option<String> = session.get(SK_ROLE).await.ok().flatten();
 
     if username.is_none() {
         return ApiError::Unauthorized.into_response();
     }
+    let username = username.unwrap();
+
+    // T-P10 (CFG-017): the role cached in the session is re-checked against
+    // the live user store on every request — a demotion/role change takes
+    // effect immediately, and a deleted user is logged out at once. The
+    // store is small (device-local sqlite) so the per-request cost is a
+    // local read, not a network hop.
+    let current_role = app
+        .load_users()
+        .ok()
+        .and_then(|u| u.find(&username).map(|u| u.role));
+    let role = match current_role {
+        None => {
+            // User deleted while a session lived: kill the session.
+            session.clear().await;
+            return ApiError::Unauthorized.into_response();
+        }
+        Some(current) => {
+            let cached = session.get::<String>(SK_ROLE).await.ok().flatten();
+            if cached.as_deref() != Some(current.as_str()) {
+                session.insert(SK_ROLE, current.as_str()).await.ok();
+            }
+            Some(current.as_str().to_string())
+        }
+    };
 
     // Session idle timeout (spec §4.8). tower-sessions handles absolute
     // expiry via the session store TTL; idle timeout is enforced here by

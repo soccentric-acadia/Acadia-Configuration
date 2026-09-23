@@ -67,6 +67,7 @@ pub(crate) async fn build(sysroot: Sysroot) -> Application {
         systemd: crate::systemd::make_client(&sysroot).await,
         users_path: database,
         login_throttle: Arc::new(LoginThrottle::new()),
+        ip_throttle: Arc::new(LoginThrottle::new()),
         sse_connections: Arc::new(tokio::sync::Semaphore::new(MAX_SSE_CONNECTIONS)),
         pairing: Arc::new(std::sync::Mutex::new(
             webconfig_engine::pairing::PairingAgent::load(&webconfig_dir),

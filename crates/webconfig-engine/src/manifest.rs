@@ -232,9 +232,20 @@ mod tests {
             .collect();
         let manifest_allowed: std::collections::BTreeSet<String> =
             manifest.service_allowlist.iter().cloned().collect();
-        assert_eq!(
-            polkit_allowed, manifest_allowed,
-            "polkit allowlist and board-manifests/acadia.json's service_allowlist have drifted apart"
+        // T-P02: the polkit rule is a SUPERSET of the manifest's curated
+        // service_allowlist — it must additionally cover every unit the
+        // appliers drive (chrony, gpsd, hostapd, …) and the fixed
+        // webconfigd.service/webconfig-syslog-forward entries. The invariant
+        // stays a drift guard: the manifest base set must never fall out of
+        // the rule (that would break the Services page), and the rule must
+        // never shrink below it.
+        assert!(
+            manifest_allowed.is_subset(&polkit_allowed),
+            "board-manifests/acadia.json's service_allowlist must be covered by the \
+             polkit rule (missing: {:?})",
+            manifest_allowed
+                .difference(&polkit_allowed)
+                .collect::<Vec<_>>()
         );
     }
 

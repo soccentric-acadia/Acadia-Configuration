@@ -127,6 +127,7 @@ async fn build_app_full(
         },
         users_path: webconfig_dir.join("users.json"),
         login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
+        ip_throttle: Arc::new(crate::auth::LoginThrottle::new()),
         sse_connections: Arc::new(tokio::sync::Semaphore::new(
             crate::bootstrap::MAX_SSE_CONNECTIONS,
         )),
@@ -2815,4 +2816,159 @@ async fn system_apply_all_covers_every_registered_applier() {
         assert!(r["applier"].is_string());
         assert!(r["ok"].is_boolean());
     }
+}
+
+// ── T-P10 (P-A03): first-boot claim code ────────────────────────────────────
+#[tokio::test]
+async fn first_boot_requires_claim_code_when_provisioned() {
+    let (app, dir) = build_app().await;
+    let claim_dir = dir.path().join("pst/webconfig");
+    std::fs::create_dir_all(&claim_dir).unwrap();
+    std::fs::write(claim_dir.join("claim-code"), "ABCD1234").unwrap();
+
+    // No code supplied → forbidden; the audit log records the rejection.
+    let (st, _, _) = send(
+        &app,
+        "POST",
+        "/api/v1/auth/first-boot",
+        None,
+        None,
+        Some(r#"{"username":"admin","password":"password1"}"#),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // Wrong code → forbidden.
+    let (st, _, _) = send(
+        &app,
+        "POST",
+        "/api/v1/auth/first-boot",
+        None,
+        None,
+        Some(r#"{"username":"admin","password":"password1","claim_code":"WRONGCOD"}"#),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // Correct code → admin created; the claim file is consumed (one-time use).
+    let (st, _, _) = send(
+        &app,
+        "POST",
+        "/api/v1/auth/first-boot",
+        None,
+        None,
+        Some(r#"{"username":"admin","password":"password1","claim_code":"ABCD1234"}"#),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(!claim_dir.join("claim-code").exists());
+}
+
+// ── T-P10 (B06): per-IP login throttle ──────────────────────────────────────
+#[tokio::test]
+async fn per_ip_throttle_locks_after_threshold() {
+    use crate::auth::{IP_LOCKOUT_THRESHOLD, LoginThrottle};
+    let t = LoginThrottle::new();
+    for _ in 0..IP_LOCKOUT_THRESHOLD {
+        assert!(matches!(
+            t.begin_attempt_limited("10.0.0.9", IP_LOCKOUT_THRESHOLD).await,
+            crate::auth::AttemptDecision::Allowed { .. }
+        ));
+    }
+    // The next attempt from the same IP is hard-locked regardless of username.
+    assert!(matches!(
+        t.begin_attempt_limited("10.0.0.9", IP_LOCKOUT_THRESHOLD).await,
+        crate::auth::AttemptDecision::Locked
+    ));
+    // A different IP is unaffected.
+    assert!(matches!(
+        t.begin_attempt_limited("10.0.0.10", IP_LOCKOUT_THRESHOLD).await,
+        crate::auth::AttemptDecision::Allowed { .. }
+    ));
+}
+
+// ── T-P10 (CFG-017): role re-check on every request ────────────────────────
+#[tokio::test]
+async fn role_change_takes_effect_immediately() {
+    let (app, dir) = build_app().await;
+    let users_path = dir.path().join("data/webconfig/users.json");
+
+    // First boot (no claim file in the fake sysroot → open, audited).
+    let (st, ck, _) = send(
+        &app,
+        "POST",
+        "/api/v1/auth/first-boot",
+        None,
+        None,
+        Some(r#"{"username":"admin","password":"password1"}"#),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let cookie = ck.expect("session cookie");
+
+    // Admin can mutate (create_user is admin-gated; CSRF token from whoami).
+    let (_, _, who) = send(&app, "GET", "/api/v1/auth/whoami", Some(&cookie), None, None).await;
+    let csrf: String = serde_json::from_str::<serde_json::Value>(&who).unwrap()["csrf"]
+        .as_str()
+        .expect("csrf token present")
+        .to_string();
+    let (st, _, _) = send(
+        &app,
+        "POST",
+        "/api/v1/system/users",
+        Some(&cookie),
+        Some(&csrf),
+        Some(r#"{"username":"temp","password":"password2","role":"viewer"}"#),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    // Demote the admin to viewer directly in the store (as another admin or
+    // an HQ-driven change would). A second admin is added first because the
+    // store refuses to demote the last admin.
+    let mut users = webconfig_engine::users::UserStore::load(&users_path).unwrap();
+    users.add("admin2", "password2", webconfig_engine::users::Role::Admin).unwrap();
+    users.save(&users_path).unwrap();
+    users.set_role("admin", webconfig_engine::users::Role::Operator).unwrap();
+    users.save(&users_path).unwrap();
+
+    // The cached role is re-checked live → the next admin-only action is
+    // forbidden without any re-login.
+    let (st, _, _) = send(
+        &app,
+        "POST",
+        "/api/v1/system/users",
+        Some(&cookie),
+        Some(&csrf),
+        Some(r#"{"username":"temp2","password":"password2","role":"viewer"}"#),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+}
+
+// ── T-P10 (CFG-017): a deleted user is logged out at once ──────────────────
+#[tokio::test]
+async fn deleted_user_session_is_rejected() {
+    let (app, dir) = build_app().await;
+    let users_path = dir.path().join("data/webconfig/users.json");
+
+    let (st, ck, _) = send(
+        &app,
+        "POST",
+        "/api/v1/auth/first-boot",
+        None,
+        None,
+        Some(r#"{"username":"admin","password":"password1"}"#),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let cookie = ck.unwrap();
+
+    // Remove every user behind the daemon's back.
+    let mut users = webconfig_engine::users::UserStore::load(&users_path).unwrap();
+    users.users.clear();
+    users.save(&users_path).unwrap();
+
+    let (st, _, _) = send(&app, "GET", "/api/v1/system", Some(&cookie), None, None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
 }
