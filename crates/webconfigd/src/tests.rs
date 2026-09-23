@@ -33,6 +33,13 @@ async fn build_app() -> (axum::Router, tempfile::TempDir) {
     build_app_with(Schema::default_permissive()).await
 }
 
+/// Like [`build_app`] but also hands back the shared [`AppState`] (T-P18: the
+/// hq_bridge DeviceOps tests exercise the engine bridge directly).
+#[allow(dead_code)]
+async fn build_app_with_state() -> (axum::Router, Arc<AppState>, tempfile::TempDir) {
+    build_app_full(Schema::default_permissive(), None, None).await
+}
+
 /// Like [`build_app`] but with a caller-supplied schema (e.g. one loaded from a
 /// tempdir to exercise schema-driven paths like app `apply_hook`s).
 async fn build_app_with(schema: Schema) -> (axum::Router, tempfile::TempDir) {
@@ -46,7 +53,8 @@ async fn build_app_with_systemd(
     schema: Schema,
     systemd: Option<Arc<dyn crate::systemd::SystemdClient>>,
 ) -> (axum::Router, tempfile::TempDir) {
-    build_app_full(schema, systemd, None).await
+    let (router, _state, dir) = build_app_full(schema, systemd, None).await;
+    (router, dir)
 }
 
 /// Like [`build_app_with_systemd`] but also lets the caller substitute the
@@ -56,7 +64,7 @@ async fn build_app_full(
     schema: Schema,
     systemd: Option<Arc<dyn crate::systemd::SystemdClient>>,
     manifest_override: Option<BoardManifest>,
-) -> (axum::Router, tempfile::TempDir) {
+) -> (axum::Router, Arc<AppState>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let sysroot = Sysroot::at(dir.path());
     let webconfig_dir = sysroot.webconfig_dir();
@@ -114,7 +122,7 @@ async fn build_app_full(
         &manifest.wifi_radio,
     );
 
-    let state = AppState {
+    let state = Arc::new(AppState {
         engine: engine.clone(),
         schema: Arc::new(schema),
         manifest: Arc::new(manifest),
@@ -138,12 +146,12 @@ async fn build_app_full(
             webconfig_engine::telemetry::TelemetryQueue::load(&webconfig_dir),
         )),
         istate: Arc::new(crate::istate_client::UnavailableIstateClient),
-    };
+    });
 
     // Static dir: a tempdir is fine; API routes don't depend on it.
     let static_dir = tempfile::tempdir().unwrap().keep();
-    let router = crate::routes::build_router(state, static_dir);
-    (router, dir)
+    let router = crate::routes::build_router((*state).clone(), static_dir);
+    (router, state, dir)
 }
 
 /// Read the full response body as a UTF-8 string.
@@ -1671,7 +1679,7 @@ async fn monitoring_logs_and_io_happy_paths_via_http() {
         service_allowlist: vec!["sshd.service".into()],
         ..Default::default()
     };
-    let (app, _dir) = build_app_full(Schema::default_permissive(), None, Some(manifest)).await;
+    let (app, _state, _dir) = build_app_full(Schema::default_permissive(), None, Some(manifest)).await;
     let (cookie, csrf) = boot_admin(&app).await;
 
     // --- monitoring ---
@@ -2341,7 +2349,7 @@ async fn mcu_firmware_verifies_real_signature_and_rejects_tampering() {
         }],
         ..Default::default()
     };
-    let (app, dir) = build_app_full(Schema::default_permissive(), None, Some(manifest)).await;
+    let (app, _state, dir) = build_app_full(Schema::default_permissive(), None, Some(manifest)).await;
     let (cookie, csrf) = boot_admin(&app).await;
 
     let firmware_bytes = b"fake-stm32-firmware-image-bytes-v1".to_vec();
@@ -2971,4 +2979,99 @@ async fn deleted_user_session_is_rejected() {
 
     let (st, _, _) = send(&app, "GET", "/api/v1/system", Some(&cookie), None, None).await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
+}
+
+// ── T-P18 (SB-6d/C08/E11): write applies + reports per-applier outcomes ────
+#[tokio::test]
+async fn hq_write_merges_sections_and_reports_appliers() {
+    let (app, state, _dir) = build_app_with_state().await;
+
+
+    // First-boot admin, then queue a signed write through the device handler
+    // (the harness path HQ uses), exercising merge + apply + reporting.
+    let (st, ck, _) = send(
+        &app,
+        "POST",
+        "/api/v1/auth/first-boot",
+        None,
+        None,
+        Some(r#"{"username":"admin","password":"password1"}"#),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let cookie = session_cookie(&ck.expect("session cookie"));
+    let (_, _, who) = send(&app, "GET", "/api/v1/auth/whoami", Some(&cookie), None, None).await;
+    let csrf: String = serde_json::from_str::<serde_json::Value>(&who).unwrap()["csrf"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Seed a hostname so the merge can preserve it while time changes.
+    let (st, _, _) = send(
+        &app,
+        "PUT",
+        "/api/v1/system",
+        Some(&cookie),
+        Some(&csrf),
+        Some(
+            r#"{"hostname":"merge-keep","asset_tag":null,"time":{"timezone":null,"ntp_enabled":false,"manual_datetime":null},"ssh":{"sshd_enabled":false,"serial_getty_enabled":false,"authorized_keys":""},"ntp_servers":[]}"#,
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    // The HQ write touches only `system.time` — the merged section must keep
+    // `system.hostname`, and the outcome must report the time applier.
+    let ops = std::sync::Arc::new(crate::hq_bridge::DeviceOps {
+        engine: state.engine.clone(),
+        update_backend: state.update_backend.clone(),
+        schema: state.schema.clone(),
+        istate: state.istate.clone(),
+        coordinator: std::sync::Arc::new(crate::hq_bridge::UploadCoordinator::new()),
+        sysroot: state.engine.sysroot.clone(),
+    });
+    // The envelope must carry a real Ed25519 signature over the contract
+    // fields (T-P13); sign it with a key provisioned via the env.
+    use base64::Engine;
+    use ring::signature::KeyPair;
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+    let doc = serde_json::json!({
+        "schema_version": 1,
+        "origin": "hq",
+        "config": {"system": {"time": {"timezone": "Europe/Oslo"}}},
+    });
+    let sig = pair.sign(serde_json::to_vec(&doc).unwrap().as_slice());
+    std::env::set_var(
+        crate::hq_bridge::HQ_CONFIG_PUBKEY_ENV,
+        base64::engine::general_purpose::STANDARD.encode(pair.public_key().as_ref()),
+    );
+    let envelope = serde_json::json!({
+        "schema_version": 1,
+        "origin": "hq",
+        "config": {"system": {"time": {"timezone": "Europe/Oslo"}}},
+        "signature_algorithm": "ed25519",
+        "signature": base64::engine::general_purpose::STANDARD.encode(sig.as_ref()),
+    });
+    let outcome = ops.write_configuration(&envelope).await;
+    std::env::remove_var(crate::hq_bridge::HQ_CONFIG_PUBKEY_ENV);
+    assert!(outcome.success, "write must succeed: {outcome:?}");
+    let payload: serde_json::Value =
+        serde_json::from_str(&outcome.json_payload).expect("outcome payload is JSON");
+    assert_eq!(payload["applied"], true);
+    let appliers = payload["appliers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("appliers must be an array: {payload}"));
+    assert_eq!(appliers.len(), 3, "system → hostname/time/ssh appliers");
+    assert!(
+        appliers.iter().any(|a| a["id"] == "time" && a["ok"] == true),
+        "time applier reported: {appliers:?}"
+    );
+
+    // Merge invariant: the untouched hostname survived the section write.
+    let (_, _, cfg_text) = send(&app, "GET", "/api/v1/system", Some(&cookie), None, None).await;
+    let cfg: serde_json::Value = serde_json::from_str(&cfg_text).unwrap();
+    assert_eq!(cfg["hostname"], "merge-keep");
+    assert_eq!(cfg["time"]["timezone"], "Europe/Oslo");
 }

@@ -78,6 +78,27 @@ pub(crate) async fn build(sysroot: Sysroot) -> Application {
         istate: crate::istate_client::GrpcIstateClient::from_env().await,
     };
 
+    // T-P18 (E11/SB-6d): provisional applies auto-confirm while HQ stays
+    // reachable — probe the pairing agent's last heartbeat recency. No
+    // heartbeat yet → fail closed (window expiry rolls back).
+    let pairing_for_confirm = state.pairing.clone();
+    engine
+        .confirm
+        .set_alive_check(std::sync::Arc::new(move || {
+            let Ok(guard) = pairing_for_confirm.lock() else {
+                return false;
+            };
+            let Some(secs) = guard.record().last_heartbeat_at else {
+                return false;
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            now.saturating_sub(secs) <= HQ_ALIVE_SECS
+        }))
+        .await;
+
     Application {
         state,
         engine,
@@ -85,6 +106,11 @@ pub(crate) async fn build(sysroot: Sysroot) -> Application {
         alert_engine,
     }
 }
+
+/// HQ-reachability window for auto-confirm (T-P18): a heartbeat within this
+/// many seconds counts as "HQ still reachable". Generous vs the 30 s cadence
+/// so one missed beat does not roll back an applied network change.
+const HQ_ALIVE_SECS: u64 = 120;
 
 /// Manifest load order (0.6: JSON at `<share>/board-manifest.json` is the one
 /// canonical BSP-installed format/path — matches `docs/board-manifest.md` and

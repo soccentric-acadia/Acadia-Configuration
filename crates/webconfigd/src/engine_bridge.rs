@@ -28,14 +28,40 @@ pub struct PendingConfirm {
 }
 
 /// Manages the single in-flight provisional apply + its rollback deadline.
-#[derive(Debug, Default)]
+/// T-P18 (E11/SB-6d): the manager also holds the "HQ still reachable" probe
+/// — at window expiry a provisional apply AUTO-CONFIRMS when the HQ agent
+/// heartbeated recently, and rolls back only when HQ went silent.
+#[derive(Default)]
 pub struct ConfirmManager {
     pending: Mutex<Option<PendingConfirm>>,
+    alive: Mutex<Option<Arc<dyn Fn() -> bool + Send + Sync>>>,
+}
+
+impl std::fmt::Debug for ConfirmManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConfirmManager")
+            .field("pending", &"set-if-pending")
+            .field("alive_probe", &"<dyn Fn>")
+            .finish()
+    }
 }
 
 impl ConfirmManager {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Register the HQ-reachability probe (bootstrapped once; reads the
+    /// pairing agent's last_heartbeat_at recency).
+    pub async fn set_alive_check(&self, f: Arc<dyn Fn() -> bool + Send + Sync>) {
+        *self.alive.lock().await = Some(f);
+    }
+
+    async fn hq_alive(&self) -> bool {
+        match self.alive.lock().await.as_ref() {
+            Some(f) => f(),
+            None => false, // no probe wired: fail closed (rollback on expiry)
+        }
     }
 
     pub async fn set(&self, p: PendingConfirm) {
@@ -209,17 +235,27 @@ impl EngineBridge {
     }
 
     /// Drive the commit/confirm timer: if the pending apply is past its
-    /// window, roll it back. Returns true if a rollback was performed. Called
-    /// by a periodic task in main.rs (spec §4.2: tokio timer task).
+    /// window, AUTO-CONFIRM when HQ is still reachable (T-P18/E11: the
+    /// operator's HQ session provably survives the change), otherwise roll
+    /// back. Returns true if a resolution (confirm or rollback) was
+    /// performed. Called by a periodic task in main.rs (spec §4.2).
     pub async fn tick_confirm(&self) -> bool {
         let Some(p) = self.confirm.pending().await else {
             return false;
         };
         let elapsed = p.started_at.elapsed();
         if elapsed >= Duration::from_secs(p.window_secs) {
+            if self.confirm.hq_alive().await {
+                tracing::info!(
+                    applier = %p.applier_id,
+                    "commit/confirm window elapsed — HQ still reachable, auto-confirming"
+                );
+                self.confirm.confirm().await; // consume
+                return true;
+            }
             tracing::warn!(
                 applier = %p.applier_id,
-                "commit/confirm window expired — rolling back"
+                "commit/confirm window expired with HQ unreachable — rolling back"
             );
             let _ = self.confirm.confirm().await; // consume
             let id = p.applier_id.clone();

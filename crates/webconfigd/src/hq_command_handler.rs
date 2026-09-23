@@ -301,6 +301,10 @@ mod tests {
     use super::*;
     use base64::Engine;
 
+    /// Serialise the WEBCONFIG_HQ_CONFIG_PUBKEY env manipulation — tests run
+    /// on threads sharing one process environment.
+    static PUBKEY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn command(operation: &str, args: &str) -> pb::Command {
         pb::Command {
             command_id: "cmd-1".into(),
@@ -416,6 +420,7 @@ mod tests {
     /// rejected (fail closed) — the old length-check-only policy is gone.
     #[test]
     fn write_is_rejected_without_provisioned_verification_key() {
+        let _guard = PUBKEY_ENV_LOCK.lock().unwrap();
         // The test harness never provisions WEBCONFIG_HQ_CONFIG_PUBKEY.
         std::env::remove_var(crate::hq_bridge::HQ_CONFIG_PUBKEY_ENV);
         let sig = base64::engine::general_purpose::STANDARD.encode([0u8; 64]);
@@ -434,6 +439,7 @@ mod tests {
     /// the signature fields).
     #[test]
     fn write_verifies_ed25519_signature_against_provisioned_key() {
+        let _guard = PUBKEY_ENV_LOCK.lock().unwrap();
         use base64::Engine;
         use ring::signature::KeyPair;
         let rng = ring::rand::SystemRandom::new();
@@ -445,10 +451,14 @@ mod tests {
             "config": {"system": {"hostname": "signed-by-hq"}},
             "signature_algorithm": "ed25519",
         });
-        // Canonical bytes = envelope minus the signature fields (the same
-        // canonicalization hq_bridge::signed_document performs).
-        let mut doc = envelope.clone();
-        doc.as_object_mut().unwrap().remove("signature_algorithm");
+        // Canonical bytes = the contract fields ONLY (schema_version/origin/
+        // config) — the same subset canonicalization hq_bridge::signed_document
+        // performs.
+        let doc = serde_json::json!({
+            "schema_version": 1,
+            "origin": "hq",
+            "config": {"system": {"hostname": "signed-by-hq"}},
+        });
         let sig = pair.sign(serde_json::to_vec(&doc).unwrap().as_slice());
         let envelope = {
             let mut e = envelope.clone();
@@ -477,6 +487,7 @@ mod tests {
     /// deployment runbook provisions PEM files.
     #[test]
     fn pem_provisioned_verification_key_is_accepted() {
+        let _guard = PUBKEY_ENV_LOCK.lock().unwrap();
         use base64::Engine;
         use ring::signature::KeyPair;
         let rng = ring::rand::SystemRandom::new();
@@ -488,8 +499,11 @@ mod tests {
             "config": {},
             "signature_algorithm": "ed25519",
         });
-        let mut doc = envelope.clone();
-        doc.as_object_mut().unwrap().remove("signature_algorithm");
+        let doc = serde_json::json!({
+            "schema_version": 1,
+            "origin": "hq",
+            "config": {},
+        });
         let sig = pair.sign(serde_json::to_vec(&doc).unwrap().as_slice());
         let mut envelope = envelope.clone();
         envelope["signature"] = serde_json::Value::String(

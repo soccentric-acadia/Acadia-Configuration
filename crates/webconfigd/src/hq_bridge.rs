@@ -28,6 +28,7 @@ use hq_agent::pb;
 use hq_agent::{AgentMailbox, CommandOutcome};
 use tokio::sync::watch;
 use webconfig_engine::audit::{AuditEntry, AuditLog};
+use webconfig_engine::applier::ApplyOutcome;
 use webconfig_engine::store::ConfigFile;
 use webconfig_engine::update::UpdateBackend;
 use webconfig_engine::Sysroot;
@@ -88,16 +89,18 @@ fn hq_config_pubkey() -> Option<Vec<u8>> {
 }
 
 /// The exact bytes HQ signs and the device verifies (T-P13, F09): the
-/// envelope minus the signature fields, canonical JSON. serde_json's default
-/// map is sorted-key/compact — byte-identical to the HQ signer's
-/// `json.dumps(..., sort_keys=True, separators=(",", ":"), ensure_ascii=False)`.
+/// configuration contract fields ONLY — `{schema_version, origin, config}` —
+/// canonical JSON. Transport metadata (`signature`, `signature_algorithm`,
+/// `integration_status`) is excluded on both sides, so the signed bytes are
+/// exactly the three contract fields, sorted-key/compact (byte-identical to
+/// the HQ signer's `json.dumps(..., sort_keys=True, separators=(",", ":"),
+/// ensure_ascii=False)`).
 fn signed_document(envelope: &serde_json::Value) -> Result<Vec<u8>, String> {
-    let mut doc = envelope
-        .as_object()
-        .ok_or("envelope must be an object")?
-        .clone();
-    doc.remove("signature");
-    doc.remove("signature_algorithm");
+    let doc = serde_json::json!({
+        "schema_version": envelope.get("schema_version").ok_or("schema_version required")?,
+        "origin": envelope.get("origin").ok_or("origin required")?,
+        "config": envelope.get("config").ok_or("config required")?,
+    });
     serde_json::to_vec(&doc).map_err(|e| e.to_string())
 }
 
@@ -148,6 +151,65 @@ pub fn validate_write_envelope(envelope: &serde_json::Value) -> Result<(), Strin
     verifier
         .verify(signed_document(envelope)?.as_slice(), &sig)
         .map_err(|_| "signature verification failed".to_string())
+}
+
+/// The appliers owned by each config section (T-P18/SB-6d): a write to a
+/// section runs exactly these, in this order.
+fn section_appliers(section: &str) -> &'static [&'static str] {
+    match section {
+        "system" => &["hostname", "time", "ssh"],
+        "network" => &["networkd", "wifi", "ap", "firewall", "wireguard"],
+        "security" => &["firewall", "wireguard"],
+        "logs" => &["journald"],
+        "io" => &["gpio", "serial", "can"],
+        _ => &[],
+    }
+}
+
+/// The current value of one config section as JSON (for the T-P18
+/// read-modify-write merge).
+fn section_value(
+    cfg: &webconfig_engine::store::Config,
+    section: &str,
+) -> Result<serde_json::Value, webconfig_engine::StoreError> {
+    use webconfig_engine::StoreError;
+    let v = match section {
+        "system" => serde_json::to_value(&cfg.system),
+        "network" => serde_json::to_value(&cfg.network),
+        "services" => serde_json::to_value(&cfg.services),
+        "updates" => serde_json::to_value(&cfg.updates),
+        "monitoring" => serde_json::to_value(&cfg.monitoring),
+        "logs" => serde_json::to_value(&cfg.logs),
+        "alerts" => serde_json::to_value(&cfg.alerts),
+        "security" => serde_json::to_value(&cfg.security),
+        "io" => serde_json::to_value(&cfg.io),
+        "app_settings" => serde_json::to_value(&cfg.app_settings),
+        other => {
+            return Err(StoreError::Validation(format!("unknown config section {other}")));
+        }
+    };
+    v.map_err(|e| StoreError::Validation(format!("section serialize: {e}")))
+}
+
+/// Deep merge `incoming` over `current`: objects merge recursively, every
+/// other type replaces. Absent fields keep their current value (T-P18).
+fn deep_merge(
+    current: serde_json::Value,
+    incoming: serde_json::Value,
+) -> serde_json::Value {
+    match (current, incoming) {
+        (serde_json::Value::Object(mut a), serde_json::Value::Object(b)) => {
+            for (k, v) in b {
+                let merged = match a.remove(&k) {
+                    Some(existing) => deep_merge(existing, v),
+                    None => v,
+                };
+                a.insert(k, merged);
+            }
+            serde_json::Value::Object(a)
+        }
+        (_, incoming) => incoming,
+    }
 }
 
 /// One queued device→HQ upload blob.
@@ -295,6 +357,13 @@ impl DeviceOps {
     ///
     /// Sections present in `config` replace the device value; absent sections
     /// are untouched (a partial merge, not a blind replace).
+    /// `configuration.write` (task 009, H5; T-P18/SB-6d): a signed, origin=hq
+    /// envelope. Sections present in `config` are MERGED over the device
+    /// value (read-modify-write: absent fields keep their current value —
+    /// this is what makes the HQ-side "[redacted]" drop safe), then the
+    /// touched sections' appliers RUN, and the outcome reports one result per
+    /// applier. Provisional outcomes arm the commit/confirm window with
+    /// auto-confirm while HQ stays reachable.
     pub async fn write_configuration(&self, envelope: &serde_json::Value) -> CommandOutcome {
         if let Err(e) = validate_write_envelope(envelope) {
             return CommandOutcome::failure("INVALID_ARGUMENT", e);
@@ -303,45 +372,46 @@ impl DeviceOps {
             Some(m) => m.clone(),
             None => return CommandOutcome::failure("INVALID_ARGUMENT", "config must be an object"),
         };
+        let touched: Vec<String> = incoming.keys().cloned().collect();
         let engine = self.engine.clone();
         let applied = engine.update(move |cfg: &mut webconfig_engine::store::Config| {
             for (key, value) in &incoming {
+                // T-P18: section merge — overlay the incoming section JSON on
+                // the current section so absent fields keep their values.
+                let current = section_value(cfg, key)?;
+                let merged = deep_merge(current, value.clone());
                 let parsed: Result<(), webconfig_engine::StoreError> = match key.as_str() {
-                    "system" => serde_json::from_value(value.clone())
+                    "system" => serde_json::from_value(merged)
                         .map(|v: webconfig_engine::store::system::SystemConfig| cfg.system = v)
                         .map_err(webconfig_engine::StoreError::Parse),
-                    "network" => serde_json::from_value(value.clone())
+                    "network" => serde_json::from_value(merged)
                         .map(|v: webconfig_engine::store::network::NetworkConfig| cfg.network = v)
                         .map_err(webconfig_engine::StoreError::Parse),
-                    "services" => serde_json::from_value(value.clone())
+                    "services" => serde_json::from_value(merged)
                         .map(|v: webconfig_engine::store::services::ServicesConfig| cfg.services = v)
                         .map_err(webconfig_engine::StoreError::Parse),
-                    "updates" => serde_json::from_value(value.clone())
+                    "updates" => serde_json::from_value(merged)
                         .map(|v: webconfig_engine::store::updates::UpdatesConfig| cfg.updates = v)
                         .map_err(webconfig_engine::StoreError::Parse),
-                    "monitoring" => serde_json::from_value(value.clone())
+                    "monitoring" => serde_json::from_value(merged)
                         .map(|v: webconfig_engine::store::monitoring::MonitoringConfig| cfg.monitoring = v)
                         .map_err(webconfig_engine::StoreError::Parse),
-                    "logs" => serde_json::from_value(value.clone())
+                    "logs" => serde_json::from_value(merged)
                         .map(|v: webconfig_engine::store::logs::LogsConfig| cfg.logs = v)
                         .map_err(webconfig_engine::StoreError::Parse),
-                    "alerts" => serde_json::from_value(value.clone())
+                    "alerts" => serde_json::from_value(merged)
                         .map(|v: webconfig_engine::store::alerts::AlertsConfig| cfg.alerts = v)
                         .map_err(webconfig_engine::StoreError::Parse),
-                    "security" => serde_json::from_value(value.clone())
+                    "security" => serde_json::from_value(merged)
                         .map(|v: webconfig_engine::store::security::SecurityConfig| cfg.security = v)
                         .map_err(webconfig_engine::StoreError::Parse),
-                    "io" => serde_json::from_value(value.clone())
+                    "io" => serde_json::from_value(merged)
                         .map(|v: webconfig_engine::store::io::IoConfig| cfg.io = v)
                         .map_err(webconfig_engine::StoreError::Parse),
                     "app_settings" => serde_json::from_value::<
                         serde_json::Map<String, serde_json::Value>,
-                    >(value.clone())
-                    .map(|map| {
-                        for (sk, sv) in map {
-                            cfg.app_settings.insert(sk, sv);
-                        }
-                    })
+                    >(merged)
+                    .map(|v| cfg.app_settings = v)
                     .map_err(webconfig_engine::StoreError::Parse),
                     other => Err(webconfig_engine::StoreError::Validation(format!(
                         "unknown config section {other}"
@@ -352,18 +422,68 @@ impl DeviceOps {
             Ok(())
         });
         match applied {
-            Ok(_) => CommandOutcome::ok_json(
-                "OK",
-                serde_json::json!({
-                    "applied": true,
+            Ok(_) => {
+                // T-P18 (SB-6d): run the appliers for the touched sections and
+                // report one outcome per applier.
+                let results = self.apply_sections(&touched).await;
+                let any_failed = results.iter().any(|r| r.1.is_err());
+                let any_provisional = results.iter().any(|r| {
+                    matches!(
+                        r.1,
+                        Ok(webconfig_engine::applier::ApplyOutcome::Provisional { .. })
+                    )
+                });
+                let appliers_json: Vec<serde_json::Value> = results
+                    .iter()
+                    .map(|(id, r)| match r {
+                        Ok(webconfig_engine::applier::ApplyOutcome::Committed) => {
+                            serde_json::json!({"id": id, "ok": true, "outcome": "committed"})
+                        }
+                        Ok(webconfig_engine::applier::ApplyOutcome::Provisional {
+                            confirm_window_secs,
+                        }) => serde_json::json!({"id": id, "ok": true, "outcome": "provisional", "confirm_window_secs": confirm_window_secs}),
+                        Err(e) => serde_json::json!({"id": id, "ok": false, "error": e}),
+                    })
+                    .collect();
+                let payload = serde_json::json!({
+                    "applied": !any_failed,
                     "origin": "hq",
                     "schema_version": webconfig_engine::CONFIG_SCHEMA_VERSION,
-                    "signature_verification": "transitional-unverified",
-                })
-                .to_string(),
-            ),
+                    "sections": touched,
+                    "appliers": appliers_json,
+                    "confirm_armed": any_provisional,
+                });
+                if any_failed {
+                    CommandOutcome::ok_json("PARTIAL", payload.to_string())
+                } else {
+                    CommandOutcome::ok_json("OK", payload.to_string())
+                }
+            }
             Err(e) => CommandOutcome::failure("INVALID_ARGUMENT", e.to_string()),
         }
+    }
+
+    /// Apply the appliers owned by the touched config sections (T-P18).
+    async fn apply_sections(
+        &self,
+        sections: &[String],
+    ) -> Vec<(String, Result<ApplyOutcome, String>)> {
+        let mut ids: Vec<&str> = Vec::new();
+        for s in sections {
+            for id in section_appliers(s) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for id in ids {
+            match self.engine.apply(id).await {
+                Ok(o) => out.push((id.to_string(), Ok(o))),
+                Err(e) => out.push((id.to_string(), Err(e.to_string()))),
+            }
+        }
+        out
     }
 
     /// T-P11 (B05): provision the operator account's authorized_keys from an
@@ -380,7 +500,7 @@ impl DeviceOps {
         if let Err(e) = stored {
             return CommandOutcome::failure("INVALID_ARGUMENT", e.to_string());
         }
-        match engine.apply("ssh").await {
+        match self.engine.apply("ssh").await {
             Ok(outcome) => CommandOutcome::ok_json(
                 "OK",
                 serde_json::json!({
