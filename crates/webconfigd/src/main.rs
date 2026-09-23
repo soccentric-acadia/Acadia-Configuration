@@ -85,6 +85,9 @@ async fn main() -> anyhow::Result<()> {
         istate: state.istate.clone(),
         coordinator: uploads.clone(),
         sysroot: state.engine.sysroot.clone(),
+        systemd: state.systemd.clone(),
+        service_allowlist: state.manifest.service_allowlist.clone(),
+        users_path: state.users_path.clone(),
     });
     let mailbox_for_agent = mailbox.clone();
     let bridge_stop = agent_stop_rx.clone();

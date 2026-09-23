@@ -41,6 +41,20 @@ use crate::istate_client::SharedIstateClient;
 /// gate for its own `factory-reset` op; the local path must not be weaker
 /// (task 009, H4).
 pub const REQUIRED_FACTORY_RESET_CONFIRMATION: &str = "FACTORY-RESET";
+/// Confirmation an HQ `system.shutdown` must carry (T-P20): a remote
+/// shutdown cannot be undone from HQ — someone must power-cycle the unit.
+pub const REQUIRED_SHUTDOWN_CONFIRMATION: &str = "SHUTDOWN";
+/// Confirmation an HQ `update.rollback` must carry (T-P20).
+pub const REQUIRED_ROLLBACK_CONFIRMATION: &str = "ROLLBACK";
+/// Delay between acknowledging a power-affecting command and executing it
+/// (T-P20). The command outcome must reach HQ BEFORE the device goes down:
+/// an unacknowledged reboot is re-delivered after the lease expires, and the
+/// in-memory idempotency cache does not survive the reboot — the device
+/// would reboot-loop.
+pub const POWER_ACTION_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Service actions an HQ `service.control` may request (T-P20).
+pub const SERVICE_ACTIONS: &[&str] = &["start", "stop", "restart", "enable", "disable"];
 
 /// The HQ configuration-signing public key sources, in order (T-P13, F09):
 /// 1. `WEBCONFIG_HQ_CONFIG_PUBKEY` — PEM ("-----BEGIN PUBLIC KEY-----", RFC
@@ -337,6 +351,13 @@ pub struct DeviceOps {
     pub istate: SharedIstateClient,
     pub coordinator: Arc<UploadCoordinator>,
     pub sysroot: Arc<Sysroot>,
+    /// T-P20: service control + status for `service.control`.
+    pub systemd: Arc<dyn crate::systemd::SystemdClient>,
+    /// T-P20: the board manifest's service allowlist — HQ may drive exactly
+    /// the units the local Services page may.
+    pub service_allowlist: Vec<String>,
+    /// T-P20: the local web-UI account store (`users.*` commands).
+    pub users_path: PathBuf,
 }
 
 impl DeviceOps {
@@ -749,9 +770,13 @@ impl DeviceOps {
     pub fn factory_reset(&self) -> CommandOutcome {
         let failures = crate::api::system::factory_reset_core(&self.sysroot, "settings");
         if failures.is_empty() {
-            if self.sysroot.is_real_root() {
-                let _ = webconfig_engine::applier::run_cmd("systemctl", &["reboot"]);
-            }
+            // T-P20: acknowledge first, reboot after POWER_ACTION_DELAY (an
+            // unacknowledged reset would be re-delivered after the reboot).
+            self.schedule_power_action("factory_reset", || {
+                webconfig_engine::applier::run_cmd("systemctl", &["reboot"])
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            });
             CommandOutcome::ok_json("OK", r#"{"factory_reset": true, "mode": "settings"}"#)
         } else {
             CommandOutcome::failure(
@@ -759,6 +784,222 @@ impl DeviceOps {
                 format!("factory reset partial failures: {}", failures.join("; ")),
             )
         }
+    }
+
+    /// Run a power-affecting action after [`POWER_ACTION_DELAY`] on a
+    /// blocking thread (T-P20), so the command outcome is acknowledged first.
+    /// A no-op outside the real root (fake-sysroot tests must never reboot
+    /// the host). Returns whether the action was scheduled.
+    fn schedule_power_action<F>(&self, label: &'static str, action: F) -> bool
+    where
+        F: FnOnce() -> Result<(), String> + Send + 'static,
+    {
+        if !self.sysroot.is_real_root() {
+            tracing::info!(action = label, "power action skipped (not the real root)");
+            return false;
+        }
+        tokio::spawn(async move {
+            tokio::time::sleep(POWER_ACTION_DELAY).await;
+            match tokio::task::spawn_blocking(action).await {
+                Ok(Ok(())) => tracing::info!(action = label, "power action executed"),
+                Ok(Err(e)) => tracing::error!(action = label, error = %e, "power action failed"),
+                Err(e) => tracing::error!(action = label, error = %e, "power action panicked"),
+            }
+        });
+        true
+    }
+
+    fn scheduled(&self, what: &str, scheduled: bool) -> CommandOutcome {
+        CommandOutcome::ok_json(
+            "OK",
+            serde_json::json!({
+                "action": what,
+                "scheduled": scheduled,
+                "delay_s": POWER_ACTION_DELAY.as_secs(),
+            })
+            .to_string(),
+        )
+    }
+
+    /// `system.reboot` (T-P20, C04).
+    pub fn reboot(&self) -> CommandOutcome {
+        let s = self.schedule_power_action("system.reboot", || {
+            webconfig_engine::applier::run_cmd("systemctl", &["reboot"])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        });
+        self.scheduled("reboot", s)
+    }
+
+    /// `system.shutdown` (T-P20, C05). Confirmation-gated in the handler.
+    pub fn shutdown(&self) -> CommandOutcome {
+        let s = self.schedule_power_action("system.shutdown", || {
+            webconfig_engine::applier::run_cmd("systemctl", &["poweroff"])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        });
+        self.scheduled("shutdown", s)
+    }
+
+    /// `update.reboot_to_apply` (T-P20, K10): tryboot into the freshly
+    /// installed slot; firmware rollback protects a slot that never boots.
+    pub fn reboot_to_apply(&self) -> CommandOutcome {
+        let backend = self.update_backend.clone();
+        let s = self.schedule_power_action("update.reboot_to_apply", move || {
+            backend.reboot_to_apply().map_err(|e| e.to_string())
+        });
+        self.scheduled("reboot_to_apply", s)
+    }
+
+    /// `update.rollback` (T-P20, K10): re-arm the previous slot and reboot.
+    /// Confirmation-gated in the handler.
+    pub fn rollback_update(&self) -> CommandOutcome {
+        let backend = self.update_backend.clone();
+        let s = self.schedule_power_action("update.rollback", move || {
+            backend.rollback().map_err(|e| e.to_string())
+        });
+        self.scheduled("rollback", s)
+    }
+
+    /// `update.confirm` (T-P20, K05/K10): mark the running slot good. No
+    /// reboot, so it runs synchronously and reports the real result.
+    pub async fn confirm_update(&self) -> CommandOutcome {
+        let backend = self.update_backend.clone();
+        match tokio::task::spawn_blocking(move || backend.mark_good()).await {
+            Ok(Ok(())) => CommandOutcome::ok_json("OK", r#"{"confirmed": true}"#),
+            Ok(Err(e)) => CommandOutcome::failure("FAILED_PRECONDITION", e.to_string()),
+            Err(e) => CommandOutcome::failure("INTERNAL", e.to_string()),
+        }
+    }
+
+    /// `service.control` (T-P20, G02): start/stop/restart/enable/disable one
+    /// unit from the board manifest's service allowlist, then report its
+    /// state.
+    pub async fn service_control(&self, unit: &str, action: &str) -> CommandOutcome {
+        if !self.service_allowlist.iter().any(|u| u == unit) {
+            return CommandOutcome::failure(
+                "PERMISSION_DENIED",
+                format!("unit {unit:?} is not in the service allowlist"),
+            );
+        }
+        let result = match action {
+            "start" => self.systemd.start(unit).await,
+            "stop" => self.systemd.stop(unit).await,
+            "restart" => self.systemd.restart(unit).await,
+            "enable" => self.systemd.enable(unit).await,
+            "disable" => self.systemd.disable(unit).await,
+            other => {
+                return CommandOutcome::failure(
+                    "INVALID_ARGUMENT",
+                    format!("unsupported service action {other:?}"),
+                )
+            }
+        };
+        if let Err(e) = result {
+            return CommandOutcome::failure("INTERNAL", e.to_string());
+        }
+        let state = self.systemd.status(unit).await.ok();
+        CommandOutcome::ok_json(
+            "OK",
+            serde_json::json!({ "unit": unit, "action": action, "state": state }).to_string(),
+        )
+    }
+
+    /// `log_bundle.request` (T-P20, J04): ask logmanager for a support
+    /// bundle, fetch its bytes and publish a `LogUploadRequest(LOG_BUNDLE)`;
+    /// the gateway answers with a presigned URL and the upload executor PUTs
+    /// it — the same path istate-originated bundles take.
+    pub async fn request_log_bundle(&self, mailbox: &AgentMailbox) -> CommandOutcome {
+        let created = match self
+            .istate
+            .relay_command("logmanager".into(), "bundle-create".into(), "{}".into())
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return CommandOutcome::failure("UNAVAILABLE", format!("bundle-create: {e}")),
+        };
+        let handle = match created.get("handle").and_then(|v| v.as_str()) {
+            Some(h) if !h.is_empty() => h.to_string(),
+            _ => return CommandOutcome::failure("INTERNAL", "bundle-create returned no handle"),
+        };
+        let upload = match self.fetch_bundle(&handle).await {
+            Ok(u) => u,
+            Err(e) => return CommandOutcome::failure("INTERNAL", e),
+        };
+        let size = upload.size_bytes;
+        self.coordinator.register(upload);
+        let sent = mailbox.try_publish(pb::AgentFrame {
+            body: Some(pb::agent_frame::Body::LogUploadRequest(
+                pb::LogUploadRequest {
+                    kind: pb::log_upload_request::Kind::LogBundle.into(),
+                    time_range_start_unix_ms: 0,
+                    time_range_end_unix_ms: 0,
+                    size_bytes_estimate: size as i64,
+                },
+            )),
+        });
+        CommandOutcome::ok_json(
+            "OK",
+            serde_json::json!({
+                "handle": handle,
+                "size_bytes": size,
+                "status": if sent { "upload_pending" } else { "upload_deferred" },
+            })
+            .to_string(),
+        )
+    }
+
+    /// `users.*` (T-P20, B02): the local web-UI account store, driven from
+    /// HQ with the same rules as the admin-only local endpoints (last-admin
+    /// guard, argon2, role parsing). Password hashes never leave the device.
+    pub fn users(&self, op: &str, args: &serde_json::Value) -> CommandOutcome {
+        use webconfig_engine::users::{Role, UserStore};
+        let str_arg = |k: &str| {
+            args.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        let mut store = match UserStore::load(&self.users_path) {
+            Ok(s) => s,
+            Err(e) => return CommandOutcome::failure("INTERNAL", e.to_string()),
+        };
+        let listing = |store: &UserStore| {
+            serde_json::json!({
+                "users": store.users.iter().map(|u| serde_json::json!({
+                    "username": u.username,
+                    "role": u.role.as_str(),
+                    "groups": u.groups,
+                })).collect::<Vec<_>>()
+            })
+        };
+        let mutated = match op {
+            "users.list" => return CommandOutcome::ok_json("OK", listing(&store).to_string()),
+            "users.create" => {
+                let password = str_arg("password");
+                if password.len() < 8 {
+                    return CommandOutcome::failure("INVALID_ARGUMENT", "password >= 8 chars");
+                }
+                Role::parse(&str_arg("role"))
+                    .and_then(|role| store.add(&str_arg("username"), &password, role))
+            }
+            "users.delete" => store.remove(&str_arg("username")),
+            "users.set_role" => Role::parse(&str_arg("role"))
+                .and_then(|role| store.set_role(&str_arg("username"), role)),
+            other => {
+                return CommandOutcome::failure(
+                    "INVALID_ARGUMENT",
+                    format!("unsupported users operation {other:?}"),
+                )
+            }
+        };
+        if let Err(e) = mutated {
+            return CommandOutcome::failure("FAILED_PRECONDITION", e.to_string());
+        }
+        if let Err(e) = store.save(&self.users_path) {
+            return CommandOutcome::failure("INTERNAL", e.to_string());
+        }
+        CommandOutcome::ok_json("OK", listing(&store).to_string())
     }
 
     /// Fetch a logmanager bundle by handle over istate (RelayCommand →

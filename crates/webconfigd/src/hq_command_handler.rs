@@ -20,7 +20,10 @@
 
 use hq_agent::pb;
 
-use crate::hq_bridge::{DeviceOps, REQUIRED_FACTORY_RESET_CONFIRMATION};
+use crate::hq_bridge::{
+    DeviceOps, REQUIRED_FACTORY_RESET_CONFIRMATION, REQUIRED_ROLLBACK_CONFIRMATION,
+    REQUIRED_SHUTDOWN_CONFIRMATION, SERVICE_ACTIONS,
+};
 use crate::istate_client::{ControlRequest, IstateClient, SharedIstateClient};
 use std::sync::Arc;
 use webconfig_engine::audit::{AuditEntry, AuditLog};
@@ -48,6 +51,22 @@ enum LocalOp {
     Restore(String),
     ApplyUpdate(serde_json::Value),
     FactoryReset,
+    /// T-P20 (C04/C05): power control, executed after the outcome is acked.
+    Reboot,
+    Shutdown,
+    /// T-P20 (K10): the remote OTA activation/confirm/rollback verbs.
+    RebootToApply,
+    ConfirmUpdate,
+    RollbackUpdate,
+    /// T-P20 (G02): one allowlisted unit, one action.
+    ServiceControl {
+        unit: String,
+        action: String,
+    },
+    /// T-P20 (J04): create + upload a logmanager support bundle.
+    LogBundleRequest,
+    /// T-P20 (B02): `users.list|create|delete|set_role` + its JSON args.
+    Users(String, serde_json::Value),
 }
 
 pub struct IstateCommandHandler {
@@ -127,6 +146,10 @@ impl IstateCommandHandler {
                     .unwrap_or("");
                 return Ok(Action::Local(LocalOp::SetSshKeys(keys.to_string())));
             }
+            // T-P20: device-local verbs of the `configuration` pseudo-daemon.
+            if let Some(op) = Self::normalize_tp20(command)? {
+                return Ok(Action::Local(op));
+            }
             // Generic pass-through to a real spoke.
             if command.daemon.is_empty() {
                 return Err("INVALID_ARGUMENT: daemon is required for spoke operations".into());
@@ -168,6 +191,71 @@ impl IstateCommandHandler {
         Ok(Action::Local(args))
     }
 
+    /// T-P20 verbs. `Ok(None)` = not a T-P20 operation.
+    fn normalize_tp20(command: &pb::Command) -> Result<Option<LocalOp>, String> {
+        let args = || -> Result<serde_json::Value, String> {
+            let raw = if command.json_args.is_empty() {
+                "{}"
+            } else {
+                command.json_args.as_str()
+            };
+            serde_json::from_str(raw)
+                .map_err(|e| format!("INVALID_ARGUMENT: json_args is not valid JSON: {e}"))
+        };
+        let confirm = |required: &str| -> Result<(), String> {
+            if command.required_confirmation == required {
+                Ok(())
+            } else {
+                Err(format!(
+                    "PERMISSION_DENIED: {} requires required_confirmation = {required}",
+                    command.operation
+                ))
+            }
+        };
+        let op = match command.operation.as_str() {
+            "system.reboot" => LocalOp::Reboot,
+            "system.shutdown" => {
+                confirm(REQUIRED_SHUTDOWN_CONFIRMATION)?;
+                LocalOp::Shutdown
+            }
+            "update.reboot_to_apply" => LocalOp::RebootToApply,
+            "update.confirm" => LocalOp::ConfirmUpdate,
+            "update.rollback" => {
+                confirm(REQUIRED_ROLLBACK_CONFIRMATION)?;
+                LocalOp::RollbackUpdate
+            }
+            "service.control" => {
+                let v = args()?;
+                let unit = v.get("unit").and_then(|x| x.as_str()).unwrap_or("");
+                let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("");
+                if unit.is_empty() || !SERVICE_ACTIONS.contains(&action) {
+                    return Err(format!(
+                        "INVALID_ARGUMENT: service.control needs unit and action in {SERVICE_ACTIONS:?}"
+                    ));
+                }
+                LocalOp::ServiceControl {
+                    unit: unit.to_string(),
+                    action: action.to_string(),
+                }
+            }
+            "log_bundle.request" => LocalOp::LogBundleRequest,
+            "users.list" | "users.create" | "users.delete" | "users.set_role" => {
+                let v = args()?;
+                if command.operation != "users.list"
+                    && v.get("username")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .is_empty()
+                {
+                    return Err("INVALID_ARGUMENT: username is required".into());
+                }
+                LocalOp::Users(command.operation.clone(), v)
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(op))
+    }
+
     async fn execute_local(&self, op: LocalOp) -> hq_agent::CommandOutcome {
         match op {
             LocalOp::ReadConfiguration => self.ops.read_configuration().await,
@@ -180,6 +268,19 @@ impl IstateCommandHandler {
             LocalOp::Restore(url) => self.ops.restore_from_url(&url).await,
             LocalOp::ApplyUpdate(args) => self.ops.apply_update(&args).await,
             LocalOp::FactoryReset => self.ops.factory_reset(),
+            LocalOp::Reboot => self.ops.reboot(),
+            LocalOp::Shutdown => self.ops.shutdown(),
+            LocalOp::RebootToApply => self.ops.reboot_to_apply(),
+            LocalOp::ConfirmUpdate => self.ops.confirm_update().await,
+            LocalOp::RollbackUpdate => self.ops.rollback_update(),
+            LocalOp::ServiceControl { unit, action } => {
+                self.ops.service_control(&unit, &action).await
+            }
+            LocalOp::LogBundleRequest => {
+                let mailbox = self.mailbox.clone();
+                self.ops.request_log_bundle(&mailbox).await
+            }
+            LocalOp::Users(op, args) => self.ops.users(&op, &args),
         }
     }
 }
@@ -411,6 +512,54 @@ mod tests {
         assert!(err.starts_with("PERMISSION_DENIED: factory reset requires"));
         cmd.required_confirmation = REQUIRED_FACTORY_RESET_CONFIRMATION.into();
         assert!(IstateCommandHandler::normalize(&cmd).is_ok());
+    }
+
+    /// T-P20: power/update/service/log/users verbs are device-local.
+    #[test]
+    fn tp20_verbs_are_local() {
+        for (op, args) in [
+            ("system.reboot", "{}"),
+            ("update.reboot_to_apply", "{}"),
+            ("update.confirm", "{}"),
+            ("log_bundle.request", "{}"),
+            (
+                "service.control",
+                r#"{"unit":"sshd.service","action":"restart"}"#,
+            ),
+            ("users.list", "{}"),
+            ("users.delete", r#"{"username":"bob"}"#),
+        ] {
+            let action = IstateCommandHandler::normalize(&command(op, args))
+                .unwrap_or_else(|e| panic!("{op}: {e}"));
+            assert!(matches!(action, Action::Local(_)), "{op} must be local");
+        }
+    }
+
+    #[test]
+    fn tp20_destructive_verbs_need_confirmation() {
+        for (op, word) in [
+            ("system.shutdown", REQUIRED_SHUTDOWN_CONFIRMATION),
+            ("update.rollback", REQUIRED_ROLLBACK_CONFIRMATION),
+        ] {
+            let mut cmd = command(op, "{}");
+            let err = IstateCommandHandler::normalize(&cmd).unwrap_err();
+            assert!(err.starts_with("PERMISSION_DENIED"), "{op}: {err}");
+            cmd.required_confirmation = word.into();
+            assert!(IstateCommandHandler::normalize(&cmd).is_ok(), "{op}");
+        }
+    }
+
+    #[test]
+    fn tp20_argument_validation() {
+        let err = IstateCommandHandler::normalize(&command(
+            "service.control",
+            r#"{"unit":"sshd.service","action":"mask"}"#,
+        ))
+        .unwrap_err();
+        assert!(err.starts_with("INVALID_ARGUMENT"));
+        let err = IstateCommandHandler::normalize(&command("users.create", r#"{"role":"admin"}"#))
+            .unwrap_err();
+        assert!(err.starts_with("INVALID_ARGUMENT"));
     }
 
     #[test]

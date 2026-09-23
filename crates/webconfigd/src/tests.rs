@@ -3053,6 +3053,9 @@ async fn hq_write_merges_sections_and_reports_appliers() {
         istate: state.istate.clone(),
         coordinator: std::sync::Arc::new(crate::hq_bridge::UploadCoordinator::new()),
         sysroot: state.engine.sysroot.clone(),
+        systemd: state.systemd.clone(),
+        service_allowlist: state.manifest.service_allowlist.clone(),
+        users_path: state.users_path.clone(),
     });
     // The envelope must carry a real Ed25519 signature over the contract
     // fields (T-P13); sign it with a key provisioned via the env.
@@ -3100,4 +3103,87 @@ async fn hq_write_merges_sections_and_reports_appliers() {
     let cfg: serde_json::Value = serde_json::from_str(&cfg_text).unwrap();
     assert_eq!(cfg["hostname"], "merge-keep");
     assert_eq!(cfg["time"]["timezone"], "Europe/Oslo");
+}
+
+// ── T-P20 (C04/C05/K10/G02/B02): HQ command kinds executed on-device ──────
+fn tp20_ops(state: &Arc<AppState>) -> crate::hq_bridge::DeviceOps {
+    crate::hq_bridge::DeviceOps {
+        engine: state.engine.clone(),
+        update_backend: state.update_backend.clone(),
+        schema: state.schema.clone(),
+        istate: state.istate.clone(),
+        coordinator: std::sync::Arc::new(crate::hq_bridge::UploadCoordinator::new()),
+        sysroot: state.engine.sysroot.clone(),
+        systemd: state.systemd.clone(),
+        service_allowlist: state.manifest.service_allowlist.clone(),
+        users_path: state.users_path.clone(),
+    }
+}
+
+#[tokio::test]
+async fn tp20_power_actions_never_fire_on_the_fake_root() {
+    let (_app, state, _dir) = build_app_with_state().await;
+    let ops = tp20_ops(&state);
+    for outcome in [
+        ops.reboot(),
+        ops.shutdown(),
+        ops.reboot_to_apply(),
+        ops.rollback_update(),
+    ] {
+        assert!(outcome.success, "{}", outcome.message);
+        let v: serde_json::Value = serde_json::from_str(&outcome.json_payload).unwrap();
+        assert_eq!(
+            v["scheduled"], false,
+            "fake sysroot must never power-cycle the host"
+        );
+    }
+}
+
+#[tokio::test]
+async fn tp20_users_commands_roundtrip_with_local_rules() {
+    let (app, state, _dir) = build_app_with_state().await;
+    boot_admin(&app).await;
+    let ops = tp20_ops(&state);
+    let created = ops.users(
+        "users.create",
+        &serde_json::json!({"username": "ops1", "password": "password9", "role": "operator"}),
+    );
+    assert!(created.success, "{}", created.message);
+    assert!(created.json_payload.contains("\"ops1\""));
+    assert!(
+        !created.json_payload.contains("password"),
+        "hashes/passwords never leave"
+    );
+    let short = ops.users(
+        "users.create",
+        &serde_json::json!({"username": "ops2", "password": "short", "role": "viewer"}),
+    );
+    assert!(!short.success);
+    let role = ops.users(
+        "users.set_role",
+        &serde_json::json!({"username": "ops1", "role": "viewer"}),
+    );
+    assert!(role.success, "{}", role.message);
+    assert!(role.json_payload.contains("\"viewer\""));
+    let deleted = ops.users("users.delete", &serde_json::json!({"username": "ops1"}));
+    assert!(deleted.success);
+    let listed = ops.users("users.list", &serde_json::json!({}));
+    assert!(!listed.json_payload.contains("\"ops1\""));
+}
+
+#[tokio::test]
+async fn tp20_service_control_is_allowlist_gated() {
+    let (_app, state, _dir) = build_app_with_state().await;
+    let ops = tp20_ops(&state);
+    let denied = ops.service_control("evil.service", "restart").await;
+    assert!(!denied.success);
+    assert_eq!(denied.code, "PERMISSION_DENIED");
+    let unit = state
+        .manifest
+        .service_allowlist
+        .first()
+        .cloned()
+        .expect("manifest allowlist");
+    let ok = ops.service_control(&unit, "restart").await;
+    assert!(ok.success, "{}", ok.message);
 }
