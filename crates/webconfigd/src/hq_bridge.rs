@@ -318,6 +318,37 @@ impl DeviceOps {
         }
     }
 
+    /// T-P11 (B05): provision the operator account's authorized_keys from an
+    /// HQ command. Stores the keys in the config store and runs the ssh
+    /// applier immediately — the outcome reports the apply result (the keys
+    /// must be ON the device, not merely stored).
+    pub async fn set_ssh_keys(&self, keys: &str) -> CommandOutcome {
+        let engine = self.engine.clone();
+        let keys = keys.to_string();
+        let stored = engine.update(move |cfg: &mut webconfig_engine::store::Config| {
+            cfg.system.ssh.authorized_keys = keys;
+            Ok(())
+        });
+        if let Err(e) = stored {
+            return CommandOutcome::failure("INVALID_ARGUMENT", e.to_string());
+        }
+        match engine.apply("ssh").await {
+            Ok(outcome) => CommandOutcome::ok_json(
+                "OK",
+                serde_json::json!({
+                    "applied": true,
+                    "applier": "ssh",
+                    "outcome": match outcome {
+                        webconfig_engine::applier::ApplyOutcome::Committed => "committed",
+                        webconfig_engine::applier::ApplyOutcome::Provisional { .. } => "provisional",
+                    },
+                })
+                .to_string(),
+            ),
+            Err(e) => CommandOutcome::failure("INTERNAL", e.to_string()),
+        }
+    }
+
     /// `take_backup_now` (task 009, H7): build the redacted backup document,
     /// register it for upload, and publish a `LogUploadRequest(BACKUP)`; the
     /// gateway answers with a presigned URL and [`UploadExecutor`] PUTs it.

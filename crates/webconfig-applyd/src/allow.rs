@@ -122,10 +122,11 @@ pub const WRITE_PREFIXES: &[&str] = &[
     "/etc/wpa_supplicant/",
     // wireguard tunnel config (wireguard.rs)
     "/etc/wireguard/",
-    // sshd_config.d drop-ins + authorized_keys (ssh.rs; T-P11 revisits the
-    // /root ownership with the operator-account decision)
+    // sshd_config.d drop-ins (ssh.rs)
     "/etc/ssh/sshd_config.d/",
-    "/root/.ssh/",
+    // operator account authorized_keys (ssh.rs, T-P11/B05: keys live for the
+    // operator user, never root — PermitRootLogin is no in the image)
+    "/home/operator/.ssh/",
 ];
 
 /// Exact files the appliers write outside the prefix trees.
@@ -133,6 +134,15 @@ pub const WRITE_FILES: &[&str] = &["/etc/hostname"];
 
 /// Accounts `chpasswd` may be pointed at (B04: root password from the UI).
 pub const PASSWORD_USERS: &[&str] = &["root", "rpi"];
+
+/// User:group pairs a write/mkdir may be chown'ed to (T-P11: the operator's
+/// authorized_keys must be operator-owned). Root keeps root ownership.
+pub const OWNER_ALLOWED: &[&str] = &["operator:operator", "root:root", "webconfig:webconfig"];
+
+/// Whether a write/mkdir may carry this owner.
+pub fn owner_allowed(owner: &str) -> bool {
+    owner.is_empty() || OWNER_ALLOWED.contains(&owner)
+}
 
 /// Whether this (program, args) pair is allowed to run.
 pub fn exec_allowed(program: &str, args: &[String]) -> bool {
@@ -417,7 +427,7 @@ mod tests {
             "/etc/dnsmasq.d/webconfig-ap.conf",
             "/etc/wpa_supplicant/wpa_supplicant.conf",
             "/etc/wireguard/wg0.conf",
-            "/root/.ssh/authorized_keys",
+            "/home/operator/.ssh/authorized_keys",
         ] {
             assert!(path_allowed(std::path::Path::new(p)), "must allow {p}");
         }

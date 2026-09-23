@@ -57,19 +57,24 @@ pub const ENV_ALLOWED_UID: &str = "WEBCONFIG_APPLYD_ALLOWED_UID";
 pub enum Request {
     /// Run one allowlisted program with validated arguments.
     Exec { program: String, args: Vec<String> },
-    /// Write (create/replace) one allowlisted file. `mode` defaults to 0644.
+    /// Write (create/replace) one allowlisted file. `mode` defaults to 0644;
+    /// `owner` ("user:group") is optional and allowlisted (T-P11).
     WriteFile {
         path: String,
         #[serde(default = "default_file_mode")]
         mode: u32,
         /// base64 of the file contents (binary-safe).
         content: String,
+        #[serde(default)]
+        owner: String,
     },
     /// Create a directory (and parents) inside an allowlisted tree.
     Mkdir {
         path: String,
         #[serde(default = "default_dir_mode")]
         mode: u32,
+        #[serde(default)]
+        owner: String,
     },
     /// Remove one allowlisted file (applier cleanup paths).
     RemoveFile { path: String },
@@ -167,8 +172,10 @@ pub fn handle(request: &str) -> Reply {
     };
     match req {
         Request::Exec { program, args } => handle_exec(&program, &args),
-        Request::WriteFile { path, mode, content } => handle_write(&path, mode, &content),
-        Request::Mkdir { path, mode } => handle_mkdir(&path, mode),
+        Request::WriteFile { path, mode, content, owner } => {
+            handle_write(&path, mode, &content, &owner)
+        }
+        Request::Mkdir { path, mode, owner } => handle_mkdir(&path, mode, &owner),
         Request::RemoveFile { path } => handle_remove(&path),
         Request::SetMode { path, mode } => handle_set_mode(&path, mode),
         Request::SetPassword { user, password } => handle_set_password(&user, &password),
@@ -201,7 +208,10 @@ fn checked_path(raw: &str) -> Result<&Path, String> {
     Ok(Path::new(raw))
 }
 
-fn handle_write(path: &str, mode: u32, content_b64: &str) -> Reply {
+fn handle_write(path: &str, mode: u32, content_b64: &str, owner: &str) -> Reply {
+    if !allow::owner_allowed(owner) {
+        return Reply::err(format!("owner rejected by allowlist: {owner:?}"));
+    }
     let bytes = match base64::engine::general_purpose::STANDARD.decode(content_b64) {
         Ok(b) => b,
         Err(e) => return Reply::err(format!("bad content encoding: {e}")),
@@ -227,13 +237,19 @@ fn handle_write(path: &str, mode: u32, content_b64: &str) -> Reply {
     match std::fs::write(path, &bytes) {
         Ok(()) => {
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+            if !owner.is_empty() {
+                chown_name(path, owner);
+            }
             Reply::ok()
         }
         Err(e) => Reply::err(format!("write {path:?}: {e}")),
     }
 }
 
-fn handle_mkdir(path: &str, mode: u32) -> Reply {
+fn handle_mkdir(path: &str, mode: u32, owner: &str) -> Reply {
+    if !allow::owner_allowed(owner) {
+        return Reply::err(format!("owner rejected by allowlist: {owner:?}"));
+    }
     let path = match checked_path(path) {
         Ok(p) => p,
         Err(e) => return Reply::err(e),
@@ -241,6 +257,9 @@ fn handle_mkdir(path: &str, mode: u32) -> Reply {
     match std::fs::create_dir_all(path) {
         Ok(()) => {
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+            if !owner.is_empty() {
+                chown_name(path, owner);
+            }
             Reply::ok()
         }
         Err(e) => Reply::err(format!("mkdir {path:?}: {e}")),
@@ -370,6 +389,12 @@ pub fn run() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// chown by name ("user:group") for write/mkdir owner requests. The name is
+/// allowlist-checked by allow::owner_allowed before we get here.
+fn chown_name(path: &Path, owner: &str) {
+    let _ = std::process::Command::new("chown").arg(owner).arg(path).status();
 }
 
 /// chown without libc: this root daemon shells out to coreutils chown.

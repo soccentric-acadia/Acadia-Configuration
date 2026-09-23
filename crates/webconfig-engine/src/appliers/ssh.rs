@@ -1,8 +1,10 @@
 //! SSH / serial-getty applier (spec §4.1).
 //!
 //! Applies the `system.ssh` slice:
-//!   - `authorized_keys` → written to `<sysroot>/root/.ssh/authorized_keys`
-//!     (0600, dir 0700), with a single-level file backup for rollback.
+//!   - `authorized_keys` → written to the operator account,
+//!     `<sysroot>/home/operator/.ssh/authorized_keys` (0600, dir 0700,
+//!     owner operator:operator — T-P11/B05: keys never live under /root),
+//!     with a single-level file backup for rollback.
 //!   - `sshd_enabled` → `systemctl enable/start` or `disable/stop` of
 //!     `sshd.service` on the real root.
 //!   - `serial_getty_enabled` → enable/disable the console serial-getty unit
@@ -52,8 +54,12 @@ impl SshApplier {
         }
     }
 
+    /// The operator account's authorized_keys (T-P11: keys for the operator
+    /// user, never root — PermitRootLogin is `no` in the image hardening).
+    pub const OPERATOR_USER: &str = "operator";
+
     fn authorized_keys_path(sysroot: &Sysroot) -> std::path::PathBuf {
-        sysroot.join("/root/.ssh/authorized_keys")
+        sysroot.join("/home/operator/.ssh/authorized_keys")
     }
 
     /// Validate the authorized_keys blob: blank lines and `#` comments are
@@ -146,11 +152,11 @@ impl Applier for SshApplier {
         // authorized_keys file (with backup for rollback).
         let path = Self::authorized_keys_path(sysroot);
         if let Some(parent) = path.parent() {
-            crate::priv_client::create_dir_all(parent)?;
-            #[cfg(unix)]
-            {
-                                let _ = crate::priv_client::set_mode(parent, 0o700);
-            }
+            crate::priv_client::create_dir_all_mode(
+                parent,
+                0o700,
+                &format!("{}:{}", Self::OPERATOR_USER, Self::OPERATOR_USER),
+            )?;
         }
         let backup = FileBackup::capture(path.clone())?;
         // Normalize: trim trailing whitespace, ensure trailing newline only if
@@ -163,11 +169,12 @@ impl Applier for SshApplier {
                 crate::priv_client::remove_file(&path)?;
             }
         } else {
-            crate::priv_client::write_file(&path, format!("{normalized}\n"))?;
-            #[cfg(unix)]
-            {
-                                let _ = crate::priv_client::set_mode(&path, 0o600);
-            }
+            crate::priv_client::write_file_owner(
+                &path,
+                format!("{normalized}\n"),
+                0o600,
+                &format!("{}:{}", Self::OPERATOR_USER, Self::OPERATOR_USER),
+            )?;
         }
         *self.last_keys_backup.lock().unwrap() = Some(backup);
 
@@ -269,7 +276,7 @@ mod tests {
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIILd+yzrE8pXGzqE8pXGzq admin@laptop".into();
         a.apply(&sys, &c).unwrap();
         let written =
-            std::fs::read_to_string(dir.path().join("root/.ssh/authorized_keys")).unwrap();
+            std::fs::read_to_string(dir.path().join("home/operator/.ssh/authorized_keys")).unwrap();
         assert!(written.contains("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5"));
     }
 
@@ -282,18 +289,18 @@ mod tests {
         c.system.ssh.authorized_keys =
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIILd+yzrE8pXGzq admin@laptop".into();
         a.apply(&sys, &c).unwrap();
-        assert!(dir.path().join("root/.ssh/authorized_keys").exists());
+        assert!(dir.path().join("home/operator/.ssh/authorized_keys").exists());
 
         c.system.ssh.authorized_keys = String::new();
         a.apply(&sys, &c).unwrap();
-        assert!(!dir.path().join("root/.ssh/authorized_keys").exists());
+        assert!(!dir.path().join("home/operator/.ssh/authorized_keys").exists());
     }
 
     #[test]
     fn rollback_restores_prior_authorized_keys() {
         let dir = tempfile::tempdir().unwrap();
         let sys = Sysroot::at(dir.path());
-        let path = dir.path().join("root/.ssh/authorized_keys");
+        let path = dir.path().join("home/operator/.ssh/authorized_keys");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQ== first\n").unwrap();
 

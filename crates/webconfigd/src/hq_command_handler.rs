@@ -38,6 +38,8 @@ enum Action {
 enum LocalOp {
     ReadConfiguration,
     WriteConfiguration(serde_json::Value),
+    /// T-P11 (B05): provision the operator account's authorized_keys.
+    SetSshKeys(String),
     BackupNow,
     Restore(String),
     ApplyUpdate(serde_json::Value),
@@ -98,6 +100,23 @@ impl IstateCommandHandler {
                 validate_write_envelope(&value).map_err(|e| format!("INVALID_ARGUMENT: {e}"))?;
                 return Ok(Action::Local(LocalOp::WriteConfiguration(value)));
             }
+            // T-P11 (B05): HQ-driven SSH key provisioning for the operator
+            // account. The keys are applied immediately (ssh applier) and the
+            // outcome reports the apply result, not just the store write.
+            if command.operation == "ssh_keys.set" {
+                let args = if command.json_args.is_empty() {
+                    "{}".to_owned()
+                } else {
+                    command.json_args.clone()
+                };
+                let value: serde_json::Value = serde_json::from_str(&args)
+                    .map_err(|e| format!("INVALID_ARGUMENT: envelope is not valid JSON: {e}"))?;
+                let keys = value
+                    .get("authorized_keys")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                return Ok(Action::Local(LocalOp::SetSshKeys(keys.to_string())));
+            }
             // Generic pass-through to a real spoke.
             if command.daemon.is_empty() {
                 return Err("INVALID_ARGUMENT: daemon is required for spoke operations".into());
@@ -145,6 +164,7 @@ impl IstateCommandHandler {
         match op {
             LocalOp::ReadConfiguration => self.ops.read_configuration().await,
             LocalOp::WriteConfiguration(envelope) => self.ops.write_configuration(&envelope).await,
+            LocalOp::SetSshKeys(keys) => self.ops.set_ssh_keys(&keys).await,
             LocalOp::BackupNow => {
                 let mailbox = self.mailbox.clone();
                 self.ops.backup_now(&mailbox).await
@@ -308,6 +328,30 @@ mod tests {
         ))
         .expect("read is executable locally");
         assert!(matches!(action, Action::Local(LocalOp::ReadConfiguration)));
+    }
+
+    /// T-P11 (B05): ssh_keys.set is a local op carrying the authorized_keys
+    /// blob; empty args mean "clear the keys" and stay valid.
+    #[test]
+    fn ssh_keys_set_is_local_with_keys() {
+        let action = IstateCommandHandler::normalize(&command(
+            "ssh_keys.set",
+            r#"{"authorized_keys":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI… op@laptop"}"#,
+        ))
+        .expect("ssh_keys.set is executable locally");
+        match action {
+            Action::Local(LocalOp::SetSshKeys(keys)) => {
+                assert!(keys.starts_with("ssh-ed25519 "));
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ssh_keys_set_with_empty_args_clears() {
+        let action = IstateCommandHandler::normalize(&command("ssh_keys.set", "{}"))
+            .expect("clearing is a valid set");
+        assert!(matches!(action, Action::Local(LocalOp::SetSshKeys(_))));
     }
 
     #[test]

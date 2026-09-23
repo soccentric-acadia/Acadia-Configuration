@@ -133,6 +133,38 @@ fn exec_at(
     ))
 }
 
+/// Write one allowlisted file with mode + owner (`"user:group"`). Local
+/// fallback: chmod only (ownership applies on-device via the helper; the
+/// fake-sysroot tests don't assert ownership).
+pub fn write_file_owner(
+    path: &Path,
+    bytes: impl AsRef<[u8]>,
+    mode: u32,
+    owner: &str,
+) -> std::io::Result<()> {
+    if !active() {
+        write_file_mode(path, bytes, mode)?;
+        Ok(())
+    } else {
+        write_file_owner_at(&socket_path(), path, bytes, mode, owner)
+    }
+}
+
+/// mkdir -p with mode + owner (`"user:group"`).
+pub fn create_dir_all_mode(path: &Path, mode: u32, owner: &str) -> std::io::Result<()> {
+    if !active() {
+        std::fs::create_dir_all(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+        }
+        Ok(())
+    } else {
+        create_dir_all_mode_at(&socket_path(), path, mode, owner)
+    }
+}
+
 /// Write one allowlisted file through the helper (default mode 0644).
 /// Accepts anything `std::fs::write` accepts (`impl AsRef<[u8]>`) so the
 /// appliers' call sites only change their function prefix.
@@ -160,15 +192,42 @@ fn write_file_mode_at(
     bytes: impl AsRef<[u8]>,
     mode: u32,
 ) -> std::io::Result<()> {
+    write_file_owner_at(socket, path, bytes, mode, "")
+}
+
+fn write_file_owner_at(
+    socket: &std::path::Path,
+    path: &Path,
+    bytes: impl AsRef<[u8]>,
+    mode: u32,
+    owner: &str,
+) -> std::io::Result<()> {
     use base64::Engine;
     let payload = serde_json::json!({
         "verb": "write_file",
         "path": path.to_string_lossy(),
         "mode": mode,
         "content": base64::engine::general_purpose::STANDARD.encode(bytes.as_ref()),
+        "owner": owner,
     })
     .to_string();
     check(request_at(socket, payload)?, "write_file")
+}
+
+fn create_dir_all_mode_at(
+    socket: &std::path::Path,
+    path: &Path,
+    mode: u32,
+    owner: &str,
+) -> std::io::Result<()> {
+    let payload = serde_json::json!({
+        "verb": "mkdir",
+        "path": path.to_string_lossy(),
+        "mode": mode,
+        "owner": owner,
+    })
+    .to_string();
+    check(request_at(socket, payload)?, "mkdir")
 }
 
 /// mkdir -p inside an allowlisted tree (helper); `std::fs::create_dir_all`
