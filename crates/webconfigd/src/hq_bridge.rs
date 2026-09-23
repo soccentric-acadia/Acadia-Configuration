@@ -41,34 +41,72 @@ use crate::istate_client::SharedIstateClient;
 /// (task 009, H4).
 pub const REQUIRED_FACTORY_RESET_CONFIRMATION: &str = "FACTORY-RESET";
 
-/// Base64-standard or hex decode of a signature field.
-fn decode_signature(algorithm: &str, raw: &str) -> Result<Vec<u8>, String> {
-    match algorithm {
-        "ed25519" => base64::engine::general_purpose::STANDARD
-            .decode(raw)
-            .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(raw))
-            .map_err(|_| "signature is not base64".to_string()),
-        "HMAC-SHA256" => {
-            let hex = raw.trim();
-            if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err("HMAC-SHA256 signature must be 64 hex chars".into());
-            }
-            (0..hex.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
-                .collect::<Result<Vec<u8>, _>>()
-                .map_err(|e| e.to_string())
+/// The HQ configuration-signing public key sources, in order (T-P13, F09):
+/// 1. `WEBCONFIG_HQ_CONFIG_PUBKEY` — PEM ("-----BEGIN PUBLIC KEY-----", RFC
+///    8410 Ed25519 SubjectPublicKeyInfo) or raw base64 of the 32-byte key,
+/// 2. `/etc/acadia/hq-config-pub.pem` — provisioned with the fleet key.
+pub const HQ_CONFIG_PUBKEY_ENV: &str = "WEBCONFIG_HQ_CONFIG_PUBKEY";
+pub const HQ_CONFIG_PUBKEY_PATH: &str = "/etc/acadia/hq-config-pub.pem";
+
+/// Extract the raw 32-byte Ed25519 verification key from PEM (RFC 8410 SPKI
+/// DER: fixed 12-byte header + 32-byte key) or raw base64.
+fn ed25519_pubkey_bytes(input: &str) -> Result<Vec<u8>, String> {
+    let trimmed = input.trim();
+    if trimmed.starts_with("-----BEGIN") {
+        let b64: String = trimmed
+            .lines()
+            .filter(|l| !l.starts_with("-----") && !l.contains(": "))
+            .collect();
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .map_err(|_| "public key PEM body is not base64".to_string())?;
+        // RFC 8410: 0x30 0x2a 0x30 0x05 0x06 0x03 0x2b 0x65 0x70 0x03 0x21 0x00
+        if der.len() == 44 && der.starts_with(&[0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00]) {
+            return Ok(der[12..].to_vec());
         }
-        other => Err(format!("unsupported signature_algorithm {other}")),
+        return Err("public key PEM is not an Ed25519 SubjectPublicKeyInfo".into());
     }
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(trimmed.as_bytes())
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(trimmed.as_bytes()))
+        .map_err(|_| "public key is neither PEM nor base64".to_string())?;
+    if raw.len() == 32 {
+        return Ok(raw);
+    }
+    Err("raw public key must be exactly 32 bytes".into())
 }
 
-/// Envelope validation for `configuration.write` (task 009, H5).
+fn hq_config_pubkey() -> Option<Vec<u8>> {
+    if let Ok(from_env) = std::env::var(HQ_CONFIG_PUBKEY_ENV) {
+        if !from_env.trim().is_empty() {
+            return ed25519_pubkey_bytes(&from_env).ok();
+        }
+    }
+    std::fs::read_to_string(HQ_CONFIG_PUBKEY_PATH)
+        .ok()
+        .and_then(|pem| ed25519_pubkey_bytes(&pem).ok())
+}
+
+/// The exact bytes HQ signs and the device verifies (T-P13, F09): the
+/// envelope minus the signature fields, canonical JSON. serde_json's default
+/// map is sorted-key/compact — byte-identical to the HQ signer's
+/// `json.dumps(..., sort_keys=True, separators=(",", ":"), ensure_ascii=False)`.
+fn signed_document(envelope: &serde_json::Value) -> Result<Vec<u8>, String> {
+    let mut doc = envelope
+        .as_object()
+        .ok_or("envelope must be an object")?
+        .clone();
+    doc.remove("signature");
+    doc.remove("signature_algorithm");
+    serde_json::to_vec(&doc).map_err(|e| e.to_string())
+}
+
+/// Envelope validation for `configuration.write` (task 009, H5; T-P13, F09).
 ///
-/// Transitional verification policy (mirrors istate `SignedConfig`): Ed25519
-/// is the target; while no HQ signing key is provisioned the signature is
-/// length-checked only, and the unverified use is recorded in the audit
-/// trail. Verification becomes mandatory when key provisioning lands.
+/// Verification is MANDATORY: the HQ Ed25519 public key must be provisioned
+/// (env or /etc/acadia/hq-config-pub.pem) and the signature must verify over
+/// the canonical transport payload. Without a provisioned key the write is
+/// rejected outright — the old length-check-only transitional policy is gone.
 pub fn validate_write_envelope(envelope: &serde_json::Value) -> Result<(), String> {
     if envelope.get("schema_version").and_then(|v| v.as_u64())
         != Some(u64::from(webconfig_engine::CONFIG_SCHEMA_VERSION))
@@ -85,21 +123,31 @@ pub fn validate_write_envelope(envelope: &serde_json::Value) -> Result<(), Strin
         .get("signature_algorithm")
         .and_then(|v| v.as_str())
         .unwrap_or("ed25519");
+    if algorithm != "ed25519" {
+        return Err(format!(
+            "signature_algorithm must be ed25519 (got {algorithm:?}) — the transitional \
+             HMAC path is retired (T-P13)"
+        ));
+    }
     let raw = envelope
         .get("signature")
         .and_then(|v| v.as_str())
         .ok_or("signature is required")?;
-    let bytes = decode_signature(algorithm, raw).map_err(|e| format!("signature rejected: {e}"))?;
-    let expected_len = match algorithm {
-        // Ed25519 signature; HMAC-SHA256 is a 32-byte digest (transitional).
-        "ed25519" => 64,
-        "HMAC-SHA256" => 32,
-        _ => return Err("unsupported signature_algorithm".into()),
-    };
-    if bytes.len() != expected_len {
-        return Err(format!("signature must decode to {expected_len} bytes"));
+    let sig = base64::engine::general_purpose::STANDARD
+        .decode(raw)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(raw))
+        .map_err(|_| "signature is not base64".to_string())?;
+    if sig.len() != 64 {
+        return Err("signature must decode to 64 bytes".into());
     }
-    Ok(())
+    let key = hq_config_pubkey().ok_or_else(|| {
+        "FAILED_PRECONDITION: HQ verification key not provisioned — set          WEBCONFIG_HQ_CONFIG_PUBKEY or install /etc/acadia/hq-config-pub.pem"
+            .to_string()
+    })?;
+    let verifier = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &key);
+    verifier
+        .verify(signed_document(envelope)?.as_slice(), &sig)
+        .map_err(|_| "signature verification failed".to_string())
 }
 
 /// One queued device→HQ upload blob.

@@ -364,9 +364,10 @@ mod tests {
         assert!(err.starts_with("INVALID_ARGUMENT") || err.starts_with("UNAUTHENTICATED"));
     }
 
+    /// T-P13 (F09): the transitional HMAC path is retired — HMAC envelopes
+    /// are rejected outright.
     #[test]
     fn configuration_write_rejects_hmac_envelope() {
-        // The pre-alignment HQ envelope (config_version/values) must not apply.
         let err = IstateCommandHandler::normalize(&command(
             "configuration.write",
             r#"{"config_version":1,"values":{},"signature":"00","signature_algorithm":"HMAC-SHA256"}"#,
@@ -411,25 +412,101 @@ mod tests {
         ));
     }
 
+    /// T-P13: without a provisioned HQ verification key, ANY write is
+    /// rejected (fail closed) — the old length-check-only policy is gone.
     #[test]
-    fn base64_signature_is_length_checked() {
+    fn write_is_rejected_without_provisioned_verification_key() {
+        // The test harness never provisions WEBCONFIG_HQ_CONFIG_PUBKEY.
+        std::env::remove_var(crate::hq_bridge::HQ_CONFIG_PUBKEY_ENV);
         let sig = base64::engine::general_purpose::STANDARD.encode([0u8; 64]);
-        assert!(crate::hq_bridge::validate_write_envelope(&serde_json::json!({
+        let err = IstateCommandHandler::normalize(&command(
+            "configuration.write",
+            &format!(
+                r#"{{"schema_version":1,"origin":"hq","config":{{}},"signature_algorithm":"ed25519","signature":"{sig}"}}"#
+            ),
+        ))
+        .unwrap_err();
+        assert!(err.contains("verification key not provisioned"), "{err}");
+    }
+
+    /// T-P13: an envelope signed by the HQ Ed25519 key verifies against the
+    /// provisioned key, over the canonical transport payload (envelope minus
+    /// the signature fields).
+    #[test]
+    fn write_verifies_ed25519_signature_against_provisioned_key() {
+        use base64::Engine;
+        use ring::signature::KeyPair;
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let envelope = serde_json::json!({
+            "schema_version": 1,
+            "origin": "hq",
+            "config": {"system": {"hostname": "signed-by-hq"}},
+            "signature_algorithm": "ed25519",
+        });
+        // Canonical bytes = envelope minus the signature fields (the same
+        // canonicalization hq_bridge::signed_document performs).
+        let mut doc = envelope.clone();
+        doc.as_object_mut().unwrap().remove("signature_algorithm");
+        let sig = pair.sign(serde_json::to_vec(&doc).unwrap().as_slice());
+        let envelope = {
+            let mut e = envelope.clone();
+            e["signature"] = serde_json::Value::String(
+                base64::engine::general_purpose::STANDARD.encode(sig.as_ref()),
+            );
+            e
+        };
+        let pub_raw = pair.public_key().as_ref();
+        let pub_b64 = base64::engine::general_purpose::STANDARD.encode(pub_raw);
+        std::env::set_var(crate::hq_bridge::HQ_CONFIG_PUBKEY_ENV, &pub_b64);
+        let res = crate::hq_bridge::validate_write_envelope(&envelope);
+        std::env::remove_var(crate::hq_bridge::HQ_CONFIG_PUBKEY_ENV);
+        assert!(res.is_ok(), "{res:?}");
+
+        // A tampered config fails verification.
+        let mut tampered = envelope.clone();
+        tampered["config"]["system"]["hostname"] = "tampered".into();
+        std::env::set_var(crate::hq_bridge::HQ_CONFIG_PUBKEY_ENV, &pub_b64);
+        let res = crate::hq_bridge::validate_write_envelope(&tampered);
+        std::env::remove_var(crate::hq_bridge::HQ_CONFIG_PUBKEY_ENV);
+        assert!(res.is_err());
+    }
+
+    /// T-P13: a PEM (RFC 8410 SPKI) provisioned key verifies too — the
+    /// deployment runbook provisions PEM files.
+    #[test]
+    fn pem_provisioned_verification_key_is_accepted() {
+        use base64::Engine;
+        use ring::signature::KeyPair;
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let envelope = serde_json::json!({
             "schema_version": 1,
             "origin": "hq",
             "config": {},
             "signature_algorithm": "ed25519",
-            "signature": sig,
-        }))
-        .is_ok());
-        let short = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
-        assert!(crate::hq_bridge::validate_write_envelope(&serde_json::json!({
-            "schema_version": 1,
-            "origin": "hq",
-            "config": {},
-            "signature_algorithm": "ed25519",
-            "signature": short,
-        }))
-        .is_err());
+        });
+        let mut doc = envelope.clone();
+        doc.as_object_mut().unwrap().remove("signature_algorithm");
+        let sig = pair.sign(serde_json::to_vec(&doc).unwrap().as_slice());
+        let mut envelope = envelope.clone();
+        envelope["signature"] = serde_json::Value::String(
+            base64::engine::general_purpose::STANDARD.encode(sig.as_ref()),
+        );
+        // Build the RFC 8410 SPKI PEM from the raw public key.
+        let mut der = vec![
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
+        der.extend_from_slice(pair.public_key().as_ref());
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
+        let pem = format!(
+            "-----BEGIN PUBLIC KEY-----\n{b64}\n-----END PUBLIC KEY-----\n"
+        );
+        std::env::set_var(crate::hq_bridge::HQ_CONFIG_PUBKEY_ENV, &pem);
+        let res = crate::hq_bridge::validate_write_envelope(&envelope);
+        std::env::remove_var(crate::hq_bridge::HQ_CONFIG_PUBKEY_ENV);
+        assert!(res.is_ok(), "{res:?}");
     }
 }
