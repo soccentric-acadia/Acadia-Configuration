@@ -19,6 +19,9 @@ RequiresMountsFor=/pst
 Type=simple
 User=webconfig
 Group=webconfig
+# T-P04 (G03/P-J01): journalctl reads (per-service journal, Logs page) need
+# the systemd-journal group; the group always exists in the image.
+SupplementaryGroups=systemd-journal
 EnvironmentFile=/etc/default/webconfigd
 ExecStart=/usr/bin/webconfigd
 
