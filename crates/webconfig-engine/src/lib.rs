@@ -21,6 +21,7 @@ pub mod backup;
 pub mod manifest;
 pub mod monitoring;
 pub mod pairing;
+pub mod priv_client;
 pub mod schema;
 pub mod store;
 pub mod sysroot;

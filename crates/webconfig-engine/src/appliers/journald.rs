@@ -150,9 +150,9 @@ impl Applier for JournaldApplier {
         let path = Self::conf_path(sysroot);
         let prior = FileBackup::capture(path.clone())?;
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::priv_client::create_dir_all(parent)?;
         }
-        std::fs::write(&path, Self::render(config))?;
+        crate::priv_client::write_file(&path, Self::render(config))?;
         *self.backup.lock().unwrap() = Some(prior);
 
         // Remote syslog forwarder (spec §4.6). Materialize the unit when
@@ -161,12 +161,12 @@ impl Applier for JournaldApplier {
         let unit_path = Self::forwarder_path(sysroot);
         let unit_prior = FileBackup::capture(unit_path.clone())?;
         if let Some(parent) = unit_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::priv_client::create_dir_all(parent)?;
         }
         let real = sysroot.is_real_root();
         match Self::render_forwarder(config) {
             Some(unit) => {
-                std::fs::write(&unit_path, unit)?;
+                crate::priv_client::write_file(&unit_path, unit)?;
                 if real {
                     let _ = run_cmd("systemctl", &["daemon-reload"]);
                     let _ = run_cmd(
@@ -177,7 +177,7 @@ impl Applier for JournaldApplier {
             }
             None => {
                 if unit_path.exists() {
-                    std::fs::remove_file(&unit_path)?;
+                    crate::priv_client::remove_file(&unit_path)?;
                 }
                 if real {
                     let _ = run_cmd("systemctl", &["stop", "webconfig-syslog-forward.service"]);

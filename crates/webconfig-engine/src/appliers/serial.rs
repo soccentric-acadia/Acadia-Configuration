@@ -151,7 +151,7 @@ impl Applier for SerialApplier {
                     let _ = run_cmd("systemctl", &["stop", &unit]);
                     let _ = run_cmd("systemctl", &["disable", &unit]);
                 }
-                let _ = std::fs::remove_file(Self::unit_path(sysroot, &s.device));
+                let _ = crate::priv_client::remove_file(&Self::unit_path(sysroot, &s.device));
                 continue;
             }
             Self::validate_one(s)?;
@@ -159,9 +159,9 @@ impl Applier for SerialApplier {
             let path = Self::unit_path(sysroot, &s.device);
             let backup = FileBackup::capture(path.clone())?;
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
+                crate::priv_client::create_dir_all(parent)?;
             }
-            std::fs::write(&path, Self::render_unit(s))?;
+            crate::priv_client::write_file(&path, Self::render_unit(s))?;
             backups.push(backup);
             if sysroot.is_real_root() {
                 let baud_unit = format!("webconfig-serial-{dev}.service");

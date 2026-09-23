@@ -146,11 +146,10 @@ impl Applier for SshApplier {
         // authorized_keys file (with backup for rollback).
         let path = Self::authorized_keys_path(sysroot);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::priv_client::create_dir_all(parent)?;
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+                                let _ = crate::priv_client::set_mode(parent, 0o700);
             }
         }
         let backup = FileBackup::capture(path.clone())?;
@@ -161,14 +160,13 @@ impl Applier for SshApplier {
             // No keys configured: remove the file so an empty config doesn't
             // leave a zero-key authorized_keys lingering.
             if path.exists() {
-                std::fs::remove_file(&path)?;
+                crate::priv_client::remove_file(&path)?;
             }
         } else {
-            std::fs::write(&path, format!("{normalized}\n"))?;
+            crate::priv_client::write_file(&path, format!("{normalized}\n"))?;
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+                                let _ = crate::priv_client::set_mode(&path, 0o600);
             }
         }
         *self.last_keys_backup.lock().unwrap() = Some(backup);

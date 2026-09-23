@@ -87,6 +87,24 @@ pub trait Applier: Send + Sync {
 /// file-writing appliers instead. Kept as a shared helper to keep error shape
 /// uniform.
 pub fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, ApplyError> {
+    // T-P02: on a flashed device (non-root + helper socket) every live verb
+    // routes through the root helper's fixed allowlist; the direct path stays
+    // for fake sysroots, root dev runs and any deployment without the helper.
+    if crate::priv_client::active() {
+        return match crate::priv_client::exec(cmd, args) {
+            Ok((stdout, _stderr, 0)) => Ok(stdout),
+            Ok((_, stderr, code)) => Err(ApplyError::Command {
+                cmd: cmd.to_string(),
+                code: Some(code),
+                stderr,
+            }),
+            Err(e) => Err(ApplyError::Command {
+                cmd: cmd.to_string(),
+                code: None,
+                stderr: e.to_string(),
+            }),
+        };
+    }
     let out = std::process::Command::new(cmd)
         .args(args)
         .output()
@@ -107,6 +125,8 @@ pub fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, ApplyError> {
 
 /// A captured backup of a file written by an applier, so `rollback()` can
 /// restore it. Appliers keep the last backup in memory (single undo level).
+/// T-P02: restores route through the privileged helper on a real device
+/// (rollback rewrites the same /etc paths the apply wrote).
 #[derive(Debug, Clone)]
 pub struct FileBackup {
     pub path: PathBuf,
@@ -125,10 +145,13 @@ impl FileBackup {
 
     pub fn restore(self) -> Result<(), ApplyError> {
         match self.prior {
-            Some(bytes) => std::fs::write(&self.path, bytes).map_err(Into::into),
+            Some(bytes) => {
+                crate::priv_client::write_file(&self.path, &bytes)?;
+                Ok(())
+            }
             None => {
                 if self.path.exists() {
-                    std::fs::remove_file(&self.path)?;
+                    crate::priv_client::remove_file(&self.path)?;
                 }
                 Ok(())
             }

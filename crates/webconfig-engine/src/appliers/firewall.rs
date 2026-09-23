@@ -146,17 +146,17 @@ impl Applier for FirewallApplier {
         let path = Self::nft_file(sysroot);
         let prior = FileBackup::capture(path.clone())?;
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::priv_client::create_dir_all(parent)?;
         }
         if config.network.firewall.enabled {
-            std::fs::write(&path, Self::render(config))?;
+            crate::priv_client::write_file(&path, Self::render(config))?;
         } else {
             // Firewall disabled (spec §4.2 enabled flag): remove the managed
             // ruleset file so WebConfig imposes no nftables policy. The live
             // kernel table is dropped by `reload_nft` below. Previously
             // `enabled` was ignored and the default-deny ruleset was always
             // generated and loaded.
-            let _ = std::fs::remove_file(&path);
+            let _ = crate::priv_client::remove_file(&path);
         }
         *self.backup.lock().unwrap() = Some(prior);
         if sysroot.is_real_root() {

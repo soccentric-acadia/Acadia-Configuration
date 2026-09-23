@@ -110,12 +110,12 @@ impl TimeApplier {
         }
         let path = sysroot.join(TIMESYNCD_DROPIN);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::priv_client::create_dir_all(parent)?;
         }
         let backup = FileBackup::capture(path.clone())?;
         if servers.is_empty() {
             if path.exists() {
-                std::fs::remove_file(&path)?;
+                crate::priv_client::remove_file(&path)?;
             }
         } else {
             let joined = servers
@@ -124,7 +124,7 @@ impl TimeApplier {
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
                 .join(" ");
-            std::fs::write(&path, format!("[Time]\nNTP={joined}\n"))?;
+            crate::priv_client::write_file(&path, format!("[Time]\nNTP={joined}\n"))?;
         }
         *self.dropin_backup.lock().unwrap() = Some(backup);
         Ok(())

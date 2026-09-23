@@ -143,10 +143,10 @@ impl Applier for WifiApplier {
 
         let path = Self::conf_path(sysroot);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::priv_client::create_dir_all(parent)?;
         }
         let backup = FileBackup::capture(path.clone())?;
-        std::fs::write(&path, Self::render(&config.network.wifi))?;
+        crate::priv_client::write_file(&path, Self::render(&config.network.wifi))?;
         *self.backup.lock().unwrap() = Some(backup);
 
         if sysroot.is_real_root() {

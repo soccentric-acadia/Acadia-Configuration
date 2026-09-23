@@ -154,7 +154,7 @@ impl Applier for GpioApplier {
             let path = Self::unit_path(sysroot, &p.name);
             let backup = FileBackup::capture(path.clone())?;
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
+                crate::priv_client::create_dir_all(parent)?;
             }
             std::fs::write(
                 &path,

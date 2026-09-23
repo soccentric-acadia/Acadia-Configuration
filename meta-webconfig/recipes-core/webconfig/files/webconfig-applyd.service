@@ -1,0 +1,44 @@
+# webconfig-applyd.service — root privileged-apply helper (T-P02, T-P00b (a)).
+#
+# The one root-owned process in the WebConfig stack. webconfigd (non-root,
+# hardened sandbox) routes its applier file writes and live system verbs
+# through the fixed-verb UDS /run/webconfig/apply.sock this daemon binds;
+# the allowlist (crates/webconfig-applyd/src/allow.rs) is its sandbox, so
+# this unit deliberately does NOT use ProtectSystem=strict.
+#
+# Transport gate: RuntimeDirectory=webconfig is root:webconfig 0750 and the
+# socket itself is 0660 webconfig:webconfig (the daemon drops it at startup),
+# so only the webconfig daemon can connect.
+
+[Unit]
+Description=SoCcentric WebConfig privileged-apply helper
+Documentation=file:///usr/share/doc/webconfig/README
+# The helper starts with the daemon and is restarted whenever webconfigd is.
+Wants=webconfigd.service
+After=systemd-sysusers.service
+Before=webconfigd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/webconfig-applyd
+# RuntimeDirectory provides the root:webconfig 0750 directory for the socket.
+RuntimeDirectory=webconfig
+RuntimeDirectoryMode=0750
+Restart=on-failure
+RestartSec=5
+MemoryMax=16M
+# No network needed: the helper never opens sockets beyond its UDS.
+RestrictAddressFamilies=AF_UNIX
+# No user namespaces / kernel meddling.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+# The helper manages system units on behalf of webconfigd; keep the default
+# (full) capability bounding set — the allowlist module is the boundary.
+
+[Install]
+WantedBy=multi-user.target

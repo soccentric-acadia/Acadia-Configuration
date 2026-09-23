@@ -29,6 +29,7 @@ SRC_URI = " \
     file://webconfigd-${PV}.tar.gz;unpack=1;name=src \
     file://vendor.tar.gz;unpack=1;subdir=webconfigd-${PV};name=vendor \
     file://webconfigd.service \
+    file://webconfig-applyd.service \
     file://webconfigd.env \
     file://50-webconfigd.polkit.rules \
     file://pico-flash \
@@ -80,7 +81,11 @@ do_install:append() {
     install -d -o ${WEBCONFIG_USER} -g ${WEBCONFIG_GROUP} ${D}/var/lib/webconfig
 
     # Hardened systemd unit + environment.
+    # T-P02: the root privileged-apply helper + its unit. The UDS lands in
+    # /run/webconfig (RuntimeDirectory in the unit, root:webconfig 0750).
     install -d ${D}${systemd_system_unitdir}
+    install -m 0755 ${B}/release/webconfig-applyd ${D}${bindir}/webconfig-applyd
+    install -m 0644 ${WORKDIR}/webconfig-applyd.service ${D}${systemd_system_unitdir}/
     install -m 0644 ${WORKDIR}/webconfigd.service ${D}${systemd_system_unitdir}/
     install -d ${D}${sysconfdir}/default
     install -m 0644 ${WORKDIR}/webconfigd.env ${D}${sysconfdir}/default/webconfigd
@@ -95,11 +100,11 @@ do_install:append() {
     install -m 0755 ${WORKDIR}/pico-flash ${D}/usr/local/bin/pico-flash
 }
 
-SYSTEMD_SERVICE:${PN} = "webconfigd.service"
+SYSTEMD_SERVICE:${PN} = "webconfigd.service webconfig-applyd.service"
 SYSTEMD_AUTO_ENABLE:${PN} = "enable"
 
 # Pull in CA certs for TLS verification against upstream (OTA) servers.
-RDEPENDS:${PN} = "ca-certificates"
+RDEPENDS:${PN} = "ca-certificates polkit"
 # systemd is the supervisor (D-Bus actions via polkit).
 RRECOMMENDS:${PN} = "systemd polkit"
 

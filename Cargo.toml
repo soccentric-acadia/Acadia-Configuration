@@ -16,6 +16,8 @@ members = [
     "crates/hq-agent",
     "crates/webconfig-engine",
     "crates/webconfigd",
+    # T-P02: root privileged-apply helper (fixed-verb UDS daemon).
+    "crates/webconfig-applyd",
 ]
 
 # Pinned to keep the vendored offline tarball (spec §2) reproducible and to

@@ -233,7 +233,7 @@ impl Applier for NetworkdApplier {
         }
 
         let dir = Self::network_dir(sysroot);
-        std::fs::create_dir_all(&dir)?;
+        crate::priv_client::create_dir_all(&dir)?;
 
         let mut backups = self.backups.lock().unwrap();
         backups.clear();
@@ -241,9 +241,9 @@ impl Applier for NetworkdApplier {
             let path = Self::network_file(sysroot, &iface.name);
             let backup = FileBackup::capture(path.clone())?;
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
+                crate::priv_client::create_dir_all(parent)?;
             }
-            std::fs::write(&path, Self::render(iface))?;
+            crate::priv_client::write_file(&path, Self::render(iface))?;
             backups.push(backup);
         }
 
@@ -251,7 +251,7 @@ impl Applier for NetworkdApplier {
         // rollback restores the prior file (or its absence).
         let resolved = Self::resolved_dropin(sysroot);
         if let Some(parent) = resolved.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::priv_client::create_dir_all(parent)?;
         }
         backups.push(FileBackup::capture(resolved.clone())?);
         std::fs::write(

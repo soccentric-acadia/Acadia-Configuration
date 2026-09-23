@@ -85,9 +85,9 @@ impl Applier for HostnameApplier {
         let path = Self::etc_hostname(sysroot);
         let prior = FileBackup::capture(path.clone())?;
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::priv_client::create_dir_all(parent)?;
         }
-        std::fs::write(&path, format!("{hostname}\n"))?;
+        crate::priv_client::write_file(&path, format!("{hostname}\n"))?;
 
         // Real system verb — only against the real root. A tempdir sysroot
         // (tests / CI fake sysroot) skips the live call (spec §6: no hardware).

@@ -6,7 +6,6 @@
 //! The private key is generated once and stored under the data partition with
 //! restrictive permissions; it is **never** returned by the API (spec §4.8).
 
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Mutex;
 
 use crate::applier::{run_cmd, Applier, ApplyError, ApplyOutcome, FileBackup};
@@ -104,7 +103,7 @@ impl WireGuardApplier {
             return Ok(std::fs::read_to_string(&path)?.trim().to_string());
         }
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::priv_client::create_dir_all(parent)?;
         }
         let key = if sysroot.is_real_root() {
             // Real on-device keypair generation (spec §4.8).
@@ -113,9 +112,9 @@ impl WireGuardApplier {
             // Fake-sysroot test path: a stable placeholder, not a real key.
             "TEST-PRIVATE-KEY-DO-NOT-USE".to_string()
         };
-        std::fs::write(&path, &key)?;
+        crate::priv_client::write_file(&path, &key)?;
         // Private key: readable only by root (spec §4.8 — never leaves device).
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        crate::priv_client::set_mode(&path, 0o600)?;
         Ok(key)
     }
 }
@@ -184,12 +183,12 @@ impl Applier for WireGuardApplier {
         let path = Self::conf_path(sysroot);
         let prior = FileBackup::capture(path.clone())?;
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::priv_client::create_dir_all(parent)?;
         }
 
         if config.security.wireguard.enabled {
             let key = Self::ensure_key(sysroot)?;
-            std::fs::write(&path, Self::render(config, &key))?;
+            crate::priv_client::write_file(&path, Self::render(config, &key))?;
             *self.backup.lock().unwrap() = Some(prior);
             if sysroot.is_real_root() {
                 run_cmd("wg-quick", &["down", "wg0"]).ok(); // ignore if down
@@ -199,7 +198,7 @@ impl Applier for WireGuardApplier {
                 )?;
             }
         } else {
-            std::fs::write(&path, "# WireGuard disabled by WebConfig\n")?;
+            crate::priv_client::write_file(&path, "# WireGuard disabled by WebConfig\n")?;
             *self.backup.lock().unwrap() = Some(prior);
             if sysroot.is_real_root() {
                 run_cmd("wg-quick", &["down", "wg0"]).ok();

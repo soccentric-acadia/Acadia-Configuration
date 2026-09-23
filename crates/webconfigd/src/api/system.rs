@@ -740,15 +740,14 @@ pub async fn root_password(
         None,
     );
     if app.engine.sysroot.is_real_root() {
-        use std::io::Write;
-        let mut child = std::process::Command::new("chpasswd")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|_| ApiError::Internal)?;
-        if let Some(stdin) = child.stdin.as_mut() {
-            writeln!(stdin, "root:{}", req.password).ok();
-        }
-        let _ = child.wait();
+        // T-P02: the password never travels on argv — the privileged helper
+        // pipes it to chpasswd on stdin; direct spawn stays for root dev runs.
+        webconfig_engine::priv_client::set_password("root", &req.password).map_err(
+            |e| {
+                tracing::error!(error = %e, "root password change failed");
+                ApiError::Internal
+            },
+        )?;
     }
     Ok(Json(serde_json::json!({ "ok": true })))
 }

@@ -127,9 +127,9 @@ impl Applier for CanApplier {
             let path = Self::unit_path(sysroot, &c.name);
             let backup = FileBackup::capture(path.clone())?;
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
+                crate::priv_client::create_dir_all(parent)?;
             }
-            std::fs::write(&path, Self::render_unit(c))?;
+            crate::priv_client::write_file(&path, Self::render_unit(c))?;
             backups.push(backup);
             if sysroot.is_real_root() {
                 if c.up_on_boot {

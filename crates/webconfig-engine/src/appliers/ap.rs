@@ -137,26 +137,26 @@ impl Applier for ApApplier {
             // hostapd config.
             let hostapd = Self::hostapd_path(sysroot);
             if let Some(parent) = hostapd.parent() {
-                std::fs::create_dir_all(parent)?;
+                crate::priv_client::create_dir_all(parent)?;
             }
             backups.push(FileBackup::capture(hostapd.clone())?);
-            std::fs::write(&hostapd, self.render_hostapd(ap))?;
+            crate::priv_client::write_file(&hostapd, self.render_hostapd(ap))?;
 
             // dnsmasq DHCP config.
             let dnsmasq = Self::dnsmasq_path(sysroot);
             if let Some(parent) = dnsmasq.parent() {
-                std::fs::create_dir_all(parent)?;
+                crate::priv_client::create_dir_all(parent)?;
             }
             backups.push(FileBackup::capture(dnsmasq.clone())?);
-            std::fs::write(&dnsmasq, self.render_dnsmasq())?;
+            crate::priv_client::write_file(&dnsmasq, self.render_dnsmasq())?;
 
             // Static-address networkd unit for the AP interface.
             let networkd = Self::networkd_path(sysroot);
             if let Some(parent) = networkd.parent() {
-                std::fs::create_dir_all(parent)?;
+                crate::priv_client::create_dir_all(parent)?;
             }
             backups.push(FileBackup::capture(networkd.clone())?);
-            std::fs::write(&networkd, self.render_networkd())?;
+            crate::priv_client::write_file(&networkd, self.render_networkd())?;
 
             if sysroot.is_real_root() {
                 crate::applier::run_cmd("networkctl", &["reload"])?;
@@ -173,7 +173,7 @@ impl Applier for ApApplier {
             ] {
                 backups.push(FileBackup::capture(path.clone())?);
                 if path.exists() {
-                    std::fs::remove_file(&path)?;
+                    crate::priv_client::remove_file(&path)?;
                 }
             }
             if sysroot.is_real_root() {
