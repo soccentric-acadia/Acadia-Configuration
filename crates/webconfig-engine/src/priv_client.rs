@@ -74,8 +74,7 @@ fn request_at(
     payload: String,
 ) -> Result<serde_json::Value, std::io::Error> {
     let mut stream = UnixStream::connect(socket)?;
-    stream.set_read_timeout(Some(REQUEST_TIMEOUT))?
-    ;
+    stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
     stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
     writeln!(stream, "{payload}")?;
     let mut reader = BufReader::new(stream);
@@ -298,6 +297,18 @@ pub fn set_password(user: &str, password: &str) -> Result<(), std::io::Error> {
         return Err(io_err("set_password", stderr));
     }
     Ok(())
+}
+
+/// Point `/boot/autoboot.txt` at tryboot `slot` ("A"/"B") through the helper
+/// and optionally drop `/boot/boot_state` (T-P26, CFG-039).
+pub fn boot_select(slot: &str, clear_state: bool) -> std::io::Result<()> {
+    let payload = serde_json::json!({
+        "verb": "boot_select",
+        "slot": slot,
+        "clear_state": clear_state,
+    })
+    .to_string();
+    check(request(payload)?, "boot_select")
 }
 
 fn check(reply: serde_json::Value, context: &str) -> std::io::Result<()> {

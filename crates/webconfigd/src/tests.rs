@@ -1679,7 +1679,8 @@ async fn monitoring_logs_and_io_happy_paths_via_http() {
         service_allowlist: vec!["sshd.service".into()],
         ..Default::default()
     };
-    let (app, _state, _dir) = build_app_full(Schema::default_permissive(), None, Some(manifest)).await;
+    let (app, _state, _dir) =
+        build_app_full(Schema::default_permissive(), None, Some(manifest)).await;
     let (cookie, csrf) = boot_admin(&app).await;
 
     // --- monitoring ---
@@ -2349,7 +2350,8 @@ async fn mcu_firmware_verifies_real_signature_and_rejects_tampering() {
         }],
         ..Default::default()
     };
-    let (app, _state, dir) = build_app_full(Schema::default_permissive(), None, Some(manifest)).await;
+    let (app, _state, dir) =
+        build_app_full(Schema::default_permissive(), None, Some(manifest)).await;
     let (cookie, csrf) = boot_admin(&app).await;
 
     let firmware_bytes = b"fake-stm32-firmware-image-bytes-v1".to_vec();
@@ -2875,22 +2877,25 @@ async fn first_boot_requires_claim_code_when_provisioned() {
 // ── T-P10 (B06): per-IP login throttle ──────────────────────────────────────
 #[tokio::test]
 async fn per_ip_throttle_locks_after_threshold() {
-    use crate::auth::{IP_LOCKOUT_THRESHOLD, LoginThrottle};
+    use crate::auth::{LoginThrottle, IP_LOCKOUT_THRESHOLD};
     let t = LoginThrottle::new();
     for _ in 0..IP_LOCKOUT_THRESHOLD {
         assert!(matches!(
-            t.begin_attempt_limited("10.0.0.9", IP_LOCKOUT_THRESHOLD).await,
+            t.begin_attempt_limited("10.0.0.9", IP_LOCKOUT_THRESHOLD)
+                .await,
             crate::auth::AttemptDecision::Allowed { .. }
         ));
     }
     // The next attempt from the same IP is hard-locked regardless of username.
     assert!(matches!(
-        t.begin_attempt_limited("10.0.0.9", IP_LOCKOUT_THRESHOLD).await,
+        t.begin_attempt_limited("10.0.0.9", IP_LOCKOUT_THRESHOLD)
+            .await,
         crate::auth::AttemptDecision::Locked
     ));
     // A different IP is unaffected.
     assert!(matches!(
-        t.begin_attempt_limited("10.0.0.10", IP_LOCKOUT_THRESHOLD).await,
+        t.begin_attempt_limited("10.0.0.10", IP_LOCKOUT_THRESHOLD)
+            .await,
         crate::auth::AttemptDecision::Allowed { .. }
     ));
 }
@@ -2915,7 +2920,15 @@ async fn role_change_takes_effect_immediately() {
     let cookie = ck.expect("session cookie");
 
     // Admin can mutate (create_user is admin-gated; CSRF token from whoami).
-    let (_, _, who) = send(&app, "GET", "/api/v1/auth/whoami", Some(&cookie), None, None).await;
+    let (_, _, who) = send(
+        &app,
+        "GET",
+        "/api/v1/auth/whoami",
+        Some(&cookie),
+        None,
+        None,
+    )
+    .await;
     let csrf: String = serde_json::from_str::<serde_json::Value>(&who).unwrap()["csrf"]
         .as_str()
         .expect("csrf token present")
@@ -2935,9 +2948,13 @@ async fn role_change_takes_effect_immediately() {
     // an HQ-driven change would). A second admin is added first because the
     // store refuses to demote the last admin.
     let mut users = webconfig_engine::users::UserStore::load(&users_path).unwrap();
-    users.add("admin2", "password2", webconfig_engine::users::Role::Admin).unwrap();
+    users
+        .add("admin2", "password2", webconfig_engine::users::Role::Admin)
+        .unwrap();
     users.save(&users_path).unwrap();
-    users.set_role("admin", webconfig_engine::users::Role::Operator).unwrap();
+    users
+        .set_role("admin", webconfig_engine::users::Role::Operator)
+        .unwrap();
     users.save(&users_path).unwrap();
 
     // The cached role is re-checked live → the next admin-only action is
@@ -2986,7 +3003,6 @@ async fn deleted_user_session_is_rejected() {
 async fn hq_write_merges_sections_and_reports_appliers() {
     let (app, state, _dir) = build_app_with_state().await;
 
-
     // First-boot admin, then queue a signed write through the device handler
     // (the harness path HQ uses), exercising merge + apply + reporting.
     let (st, ck, _) = send(
@@ -3000,7 +3016,15 @@ async fn hq_write_merges_sections_and_reports_appliers() {
     .await;
     assert_eq!(st, StatusCode::OK);
     let cookie = session_cookie(&ck.expect("session cookie"));
-    let (_, _, who) = send(&app, "GET", "/api/v1/auth/whoami", Some(&cookie), None, None).await;
+    let (_, _, who) = send(
+        &app,
+        "GET",
+        "/api/v1/auth/whoami",
+        Some(&cookie),
+        None,
+        None,
+    )
+    .await;
     let csrf: String = serde_json::from_str::<serde_json::Value>(&who).unwrap()["csrf"]
         .as_str()
         .unwrap()
@@ -3065,7 +3089,9 @@ async fn hq_write_merges_sections_and_reports_appliers() {
         .unwrap_or_else(|| panic!("appliers must be an array: {payload}"));
     assert_eq!(appliers.len(), 3, "system → hostname/time/ssh appliers");
     assert!(
-        appliers.iter().any(|a| a["id"] == "time" && a["ok"] == true),
+        appliers
+            .iter()
+            .any(|a| a["id"] == "time" && a["ok"] == true),
         "time applier reported: {appliers:?}"
     );
 

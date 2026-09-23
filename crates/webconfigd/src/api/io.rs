@@ -130,17 +130,11 @@ pub async fn i2c_devices(
     let mut devices = Vec::new();
     let mut errors = Vec::new();
     for bus in buses {
-        match std::process::Command::new("i2cdetect")
-            .args(["-y", &bus.to_string()])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                devices.extend(parse_i2cdetect(
-                    bus,
-                    &String::from_utf8_lossy(&output.stdout),
-                ));
-            }
-            Ok(output) => errors.push(command_error("i2cdetect", &output)),
+        // CFG-040: `PrivateDevices=true` hides /dev/i2c-* from the daemon, so
+        // on a device the listing goes through the root helper (run_cmd
+        // routes there when active), exactly like the POST scan.
+        match webconfig_engine::applier::run_cmd("i2cdetect", &["-y", &bus.to_string()]) {
+            Ok(stdout) => devices.extend(parse_i2cdetect(bus, &stdout)),
             Err(error) => errors.push(error.to_string()),
         }
     }

@@ -31,7 +31,11 @@ enum Action {
     /// Execute on-device: the `configuration` pseudo-daemon verbs.
     Local(LocalOp),
     /// Relay to a spoke through istate Control.
-    Spoke { daemon: String, operation: String, json_args: String },
+    Spoke {
+        daemon: String,
+        operation: String,
+        json_args: String,
+    },
 }
 
 #[derive(Debug)]
@@ -62,7 +66,12 @@ impl IstateCommandHandler {
         ops: Arc<DeviceOps>,
         mailbox: hq_agent::AgentMailbox,
     ) -> Self {
-        Self { client, audit, ops, mailbox }
+        Self {
+            client,
+            audit,
+            ops,
+            mailbox,
+        }
     }
 
     /// Map one HQ command onto a device action. Envelope validation and the
@@ -73,7 +82,8 @@ impl IstateCommandHandler {
             return Err("INVALID_ARGUMENT: command_id is required".into());
         }
         if !command.operation.is_empty() {
-            if command.operation == "configuration.read" || command.operation == "configuration.write"
+            if command.operation == "configuration.read"
+                || command.operation == "configuration.write"
             {
                 let args = if command.json_args.is_empty() {
                     "{}".to_owned()
@@ -147,13 +157,11 @@ impl IstateCommandHandler {
                 LocalOp::FactoryReset
             }
             Some(pb::command::Kind::ApplyUpdate(value)) => {
-                LocalOp::ApplyUpdate(
-                    serde_json::json!({
-                        "artifact_id": value.artifact_id,
-                        "artifact_download_url": value.artifact_download_url,
-                        "checksum_sha256": value.checksum_sha256,
-                    }),
-                )
+                LocalOp::ApplyUpdate(serde_json::json!({
+                    "artifact_id": value.artifact_id,
+                    "artifact_download_url": value.artifact_download_url,
+                    "checksum_sha256": value.checksum_sha256,
+                }))
             }
             None => return Err("INVALID_ARGUMENT: operation is required".into()),
         };
@@ -213,7 +221,10 @@ impl hq_agent::CommandHandler for IstateCommandHandler {
                 daemon,
                 operation,
                 json_args,
-            } => self.relay_spoke(&daemon, &operation, &json_args, &actor, &command).await,
+            } => {
+                self.relay_spoke(&daemon, &operation, &json_args, &actor, &command)
+                    .await
+            }
         };
         self.record_audit(&label, outcome.success, &outcome.code);
         outcome
@@ -230,7 +241,11 @@ impl IstateCommandHandler {
             action: "command".into(),
             detail: Some(format!(
                 "{action}: {}",
-                if ok { "succeeded".to_owned() } else { format!("failed ({code})") }
+                if ok {
+                    "succeeded".to_owned()
+                } else {
+                    format!("failed ({code})")
+                }
             )),
         });
     }
@@ -257,12 +272,14 @@ impl IstateCommandHandler {
         };
         match self.client.control(request).await {
             Ok(reply) if reply.ok => hq_agent::CommandOutcome::ok_json(
-                if reply.code.is_empty() { "OK".into() } else { reply.code.clone() },
+                if reply.code.is_empty() {
+                    "OK".into()
+                } else {
+                    reply.code.clone()
+                },
                 reply.json_payload,
             ),
-            Ok(reply) => {
-                hq_agent::CommandOutcome::failure(reply.code, reply.message)
-            }
+            Ok(reply) => hq_agent::CommandOutcome::failure(reply.code, reply.message),
             Err(error) => {
                 let text = error.to_string();
                 let (code, message) = text
@@ -293,7 +310,10 @@ fn action_label(command: &pb::Command) -> String {
 
 /// The message part of "CODE: message".
 fn message_tail(error: &str) -> String {
-    error.split_once(": ").map(|(_, m)| m.to_string()).unwrap_or_else(|| error.to_string())
+    error
+        .split_once(": ")
+        .map(|(_, m)| m.to_string())
+        .unwrap_or_else(|| error.to_string())
 }
 
 #[cfg(test)]
@@ -515,9 +535,7 @@ mod tests {
         ];
         der.extend_from_slice(pair.public_key().as_ref());
         let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
-        let pem = format!(
-            "-----BEGIN PUBLIC KEY-----\n{b64}\n-----END PUBLIC KEY-----\n"
-        );
+        let pem = format!("-----BEGIN PUBLIC KEY-----\n{b64}\n-----END PUBLIC KEY-----\n");
         std::env::set_var(crate::hq_bridge::HQ_CONFIG_PUBKEY_ENV, &pem);
         let res = crate::hq_bridge::validate_write_envelope(&envelope);
         std::env::remove_var(crate::hq_bridge::HQ_CONFIG_PUBKEY_ENV);

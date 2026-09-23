@@ -82,6 +82,17 @@ pub enum Request {
     SetMode { path: String, mode: u32 },
     /// `chpasswd` on stdin — the only sanctioned password path (never argv).
     SetPassword { user: String, password: String },
+    /// Point the firmware at a tryboot slot permanently (T-P26, CFG-039):
+    /// atomically rewrite `/boot/autoboot.txt` to `boot_prefix=<slot>/` and,
+    /// when `clear_state` is set, drop `/boot/boot_state`. Used by the
+    /// SWUpdate backend's `mark_good` (confirm the running slot) and
+    /// `rollback` (re-arm the previous slot). `/boot` is otherwise never
+    /// writable through the helper.
+    BootSelect {
+        slot: String,
+        #[serde(default)]
+        clear_state: bool,
+    },
 }
 
 fn default_file_mode() -> u32 {
@@ -172,13 +183,19 @@ pub fn handle(request: &str) -> Reply {
     };
     match req {
         Request::Exec { program, args } => handle_exec(&program, &args),
-        Request::WriteFile { path, mode, content, owner } => {
-            handle_write(&path, mode, &content, &owner)
-        }
+        Request::WriteFile {
+            path,
+            mode,
+            content,
+            owner,
+        } => handle_write(&path, mode, &content, &owner),
         Request::Mkdir { path, mode, owner } => handle_mkdir(&path, mode, &owner),
         Request::RemoveFile { path } => handle_remove(&path),
         Request::SetMode { path, mode } => handle_set_mode(&path, mode),
         Request::SetPassword { user, password } => handle_set_password(&user, &password),
+        Request::BootSelect { slot, clear_state } => {
+            handle_boot_select(Path::new(BOOT_DIR), &slot, clear_state)
+        }
     }
 }
 
@@ -329,6 +346,42 @@ fn handle_set_password(user: &str, password: &str) -> Reply {
     }
 }
 
+/// The firmware boot partition (OS-016 tryboot layout).
+pub const BOOT_DIR: &str = "/boot";
+
+/// `boot_select` against an explicit boot dir (tests use a temp dir).
+pub fn handle_boot_select(boot: &Path, slot: &str, clear_state: bool) -> Reply {
+    if !allow::boot_slot_allowed(slot) {
+        return Reply::err(format!("boot slot rejected by allowlist: {slot:?}"));
+    }
+    // Only a tryboot-managed /boot with the target slot present may be
+    // re-pointed; anything else would leave the firmware without a kernel.
+    if !boot.join(slot).is_dir() {
+        return Reply::err(format!("boot slot directory {slot}/ missing"));
+    }
+    let autoboot = boot.join("autoboot.txt");
+    let tmp = boot.join("autoboot.txt.tmp");
+    let body = format!("[all]\nboot_prefix={slot}/\n");
+    let write = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, &autoboot)
+    })();
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&tmp);
+        return Reply::err(format!("write autoboot.txt: {e}"));
+    }
+    if clear_state {
+        match std::fs::remove_file(boot.join("boot_state")) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Reply::err(format!("remove boot_state: {e}")),
+        }
+    }
+    Reply::ok()
+}
+
 /// Serve one connection: read newline-delimited requests, answer each.
 pub fn serve_stream(stream: UnixStream) {
     let mut reader = BufReader::new(match stream.try_clone() {
@@ -394,7 +447,10 @@ pub fn run() -> Result<(), String> {
 /// chown by name ("user:group") for write/mkdir owner requests. The name is
 /// allowlist-checked by allow::owner_allowed before we get here.
 fn chown_name(path: &Path, owner: &str) {
-    let _ = std::process::Command::new("chown").arg(owner).arg(path).status();
+    let _ = std::process::Command::new("chown")
+        .arg(owner)
+        .arg(path)
+        .status();
 }
 
 /// chown without libc: this root daemon shells out to coreutils chown.
@@ -427,5 +483,54 @@ fn main() {
                 std::process::exit(1);
             }
         }
+    }
+}
+#[cfg(test)]
+mod boot_select_tests {
+    use super::*;
+
+    #[test]
+    fn boot_select_rewrites_autoboot_and_clears_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("B")).unwrap();
+        std::fs::write(
+            tmp.path().join("autoboot.txt"),
+            "[all]\nboot_prefix=A/\nboot_prefix_try=B/\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("boot_state"), "slot=b\n").unwrap();
+        let r = handle_boot_select(tmp.path(), "B", true);
+        assert!(r.ok, "{:?}", r.error);
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("autoboot.txt")).unwrap(),
+            "[all]\nboot_prefix=B/\n"
+        );
+        assert!(!tmp.path().join("boot_state").exists());
+    }
+
+    #[test]
+    fn boot_select_keeps_state_unless_asked() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("A")).unwrap();
+        std::fs::write(tmp.path().join("boot_state"), "slot=b\n").unwrap();
+        assert!(handle_boot_select(tmp.path(), "A", false).ok);
+        assert!(tmp.path().join("boot_state").exists());
+    }
+
+    #[test]
+    fn boot_select_rejects_bad_slots() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!handle_boot_select(tmp.path(), "C", false).ok);
+        assert!(!handle_boot_select(tmp.path(), "../A", false).ok);
+        // allowlisted but absent slot dir: refuse rather than brick
+        assert!(!handle_boot_select(tmp.path(), "A", false).ok);
+    }
+
+    #[test]
+    fn boot_select_request_parses() {
+        let req: Request =
+            serde_json::from_str(r#"{"verb":"boot_select","slot":"A","clear_state":true}"#)
+                .unwrap();
+        assert!(matches!(req, Request::BootSelect { ref slot, clear_state: true } if slot == "A"));
     }
 }

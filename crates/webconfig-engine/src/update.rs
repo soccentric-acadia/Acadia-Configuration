@@ -115,6 +115,16 @@ pub trait UpdateBackend: Send + Sync {
     /// accepted, so the failed-boot rollback counter is reset. On RAUC this is
     /// `rauc status mark-good`; the mock records the call.
     fn mark_good(&self) -> Result<(), UpdateError>;
+
+    /// Manual rollback (T-P20/K10): re-arm the PREVIOUS slot as the boot
+    /// target and reboot. The firmware tryboot flow already auto-rolls-back
+    /// on failed boots; this is the operator-invoked counterpart when a
+    /// confirmed-but-broken slot must be left deliberately.
+    fn rollback(&self) -> Result<(), UpdateError> {
+        Err(UpdateError::Other(
+            "rollback not supported by this update backend".into(),
+        ))
+    }
 }
 
 /// A compatibility check reusable by both backends (spec §4.4).
@@ -325,6 +335,12 @@ impl UpdateBackend for RaucUpdateBackend {
 #[derive(Debug, Default)]
 pub struct SwupdateUpdateBackend;
 
+/// SWUpdate configuration + signing key used by the one-shot `-i` fallback
+/// (installed by meta-acadia's rpi5-swupdate-config; mirrored in the
+/// webconfig-applyd allowlist).
+pub const SWUPDATE_CFG: &str = "/etc/swupdate/swupdate.cfg";
+pub const SWUPDATE_PUBKEY: &str = "/etc/swupdate/swupdate-public.pem";
+
 impl SwupdateUpdateBackend {
     pub fn new() -> Self {
         Self
@@ -342,7 +358,10 @@ impl SwupdateUpdateBackend {
     fn atomic_write(path: &str, content: &str) -> Result<(), UpdateError> {
         let tmp = format!("{path}.tmp");
         std::fs::write(&tmp, content)?;
-        let _ = std::process::Command::new("sync").arg("-f").arg(&tmp).output();
+        let _ = std::process::Command::new("sync")
+            .arg("-f")
+            .arg(&tmp)
+            .output();
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
@@ -370,6 +389,23 @@ impl SwupdateUpdateBackend {
         }
     }
 
+    /// Make tryboot slot `dir` ("A"/"B") the permanent boot target and
+    /// optionally drop `/boot/boot_state` (T-P26, CFG-039). On a flashed
+    /// device the sandboxed daemon cannot write `/boot`, so this goes through
+    /// the root helper's `boot_select` verb; root/dev runs write directly.
+    fn select_boot(dir: &str, clear_state: bool) -> Result<(), UpdateError> {
+        if crate::priv_client::active() {
+            return crate::priv_client::boot_select(dir, clear_state)
+                .map_err(|e| UpdateError::Other(format!("boot_select: {e}")));
+        }
+        let autoboot = format!("[all]\nboot_prefix={dir}/\n");
+        Self::atomic_write("/boot/autoboot.txt", &autoboot)?;
+        if clear_state {
+            let _ = std::fs::remove_file("/boot/boot_state");
+        }
+        Ok(())
+    }
+
     /// Parse /boot/boot_state key=value lines (no `source`-style evaluation).
     fn boot_state() -> Option<std::collections::HashMap<String, String>> {
         let raw = std::fs::read_to_string("/boot/boot_state").ok()?;
@@ -391,9 +427,8 @@ impl SwupdateUpdateBackend {
 
 impl UpdateBackend for SwupdateUpdateBackend {
     fn slots(&self) -> Result<Vec<SlotStatus>, UpdateError> {
-        let running = Self::running_slot().ok_or_else(|| {
-            UpdateError::Other("rootfs is not a rootfs-a/b A/B layout".into())
-        })?;
+        let running = Self::running_slot()
+            .ok_or_else(|| UpdateError::Other("rootfs is not a rootfs-a/b A/B layout".into()))?;
         let version = std::fs::read_to_string("/etc/os-release")
             .ok()
             .and_then(|raw| {
@@ -419,7 +454,11 @@ impl UpdateBackend for SwupdateUpdateBackend {
                     "unknown".into()
                 },
                 running: is_running,
-                confirmed: if is_running { confirmed } else { !state.is_some() },
+                confirmed: if is_running {
+                    confirmed
+                } else {
+                    !state.is_some()
+                },
                 state: if is_running && confirmed {
                     "good".into()
                 } else {
@@ -527,30 +566,17 @@ impl UpdateBackend for SwupdateUpdateBackend {
             percent: 50,
             message: "writing inactive slot (swupdate)".into(),
         });
-        // Preferred: the running SWUpdate daemon via its IPC client. Fallback:
-        // one-shot local update (`swupdate -u`) when no daemon is reachable.
-        let via_client = std::process::Command::new("swupdate-client")
-            .arg(bundle_path)
-            .output();
-        let ok = match via_client {
-            Ok(out) => out.status.success(),
-            Err(_) => false,
-        };
-        if !ok {
-            let out = std::process::Command::new("swupdate")
-                .args(["-u", bundle_path])
-                .output()
-                .map_err(|e| UpdateError::Other(format!("swupdate spawn: {e}")));
-            match out {
-                Ok(o) if o.status.success() => {}
-                Ok(o) => {
-                    return Err(UpdateError::Other(format!(
-                        "swupdate failed: {}",
-                        String::from_utf8_lossy(&o.stderr)
-                    )));
-                }
-                Err(e) => return Err(UpdateError::Other(format!("swupdate spawn: {e}"))),
-            }
+        // Preferred: the running SWUpdate daemon via its IPC client (its
+        // socket is root-only, so on a device this goes through the helper).
+        // Fallback: a one-shot LOCAL install — `-i` (CFG-038: `-u` is not a
+        // local install) with the signing key mandatory.
+        let via_client = crate::applier::run_cmd("swupdate-client", &[bundle_path]);
+        if via_client.is_err() {
+            crate::applier::run_cmd(
+                "swupdate",
+                &["-f", SWUPDATE_CFG, "-k", SWUPDATE_PUBKEY, "-i", bundle_path],
+            )
+            .map_err(|e| UpdateError::Other(format!("swupdate failed: {e}")))?;
         }
         on_progress(InstallProgress {
             stage: InstallStage::Done,
@@ -564,11 +590,24 @@ impl UpdateBackend for SwupdateUpdateBackend {
         // OS-016: the reboot must carry the firmware tryboot flag so the new
         // slot boots once via boot_prefix_try and firmware-level rollback
         // protects the device if the new slot panics.
-        crate::applier::run_cmd(
-            "systemctl",
-            &["reboot", "--reboot-argument=0 tryboot"],
-        )
-        .map_err(|e| UpdateError::Other(e.to_string()))?;
+        crate::applier::run_cmd("systemctl", &["reboot", "--reboot-argument=0 tryboot"])
+            .map_err(|e| UpdateError::Other(e.to_string()))?;
+        Ok(())
+    }
+
+    fn rollback(&self) -> Result<(), UpdateError> {
+        // T-P20 (K10): re-arm the PREVIOUS slot as the boot target (tryboot
+        // permanent prefix), clear boot_state, and reboot into it.
+        let state = Self::boot_state()
+            .ok_or_else(|| UpdateError::Other("no A/B boot_state to roll back".into()))?;
+        let prev = state
+            .get("prev_slot")
+            .cloned()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| UpdateError::Other("boot_state carries no prev_slot".into()))?;
+        Self::select_boot(&prev.to_uppercase(), true)?;
+        crate::applier::run_cmd("systemctl", &["reboot"])
+            .map_err(|e| UpdateError::Other(e.to_string()))?;
         Ok(())
     }
 
@@ -584,14 +623,10 @@ impl UpdateBackend for SwupdateUpdateBackend {
             // Not a tryboot-managed /boot (pre-OS-016 image): nothing to mark.
             return Ok(());
         }
-        let autoboot = format!("[all]\nboot_prefix={dir}/\n");
-        Self::atomic_write("/boot/autoboot.txt", &autoboot)?;
-        if let Some(state) = Self::boot_state() {
-            if state.get("slot").map(String::as_str) == Some(running.as_str()) {
-                let _ = std::fs::remove_file("/boot/boot_state");
-            }
-        }
-        Ok(())
+        let clear_state = Self::boot_state()
+            .map(|state| state.get("slot").map(String::as_str) == Some(running.as_str()))
+            .unwrap_or(false);
+        Self::select_boot(&dir, clear_state)
     }
 }
 

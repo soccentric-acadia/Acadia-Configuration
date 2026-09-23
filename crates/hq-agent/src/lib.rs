@@ -89,8 +89,7 @@ pub trait ServerFrameHooks: Send + Sync + 'static {
 
 /// No-op hooks for callers/tests that do not implement uploads.
 #[async_trait::async_trait]
-impl ServerFrameHooks for ()
-{
+impl ServerFrameHooks for () {
     async fn on_signed_upload_url(&self, _url: pb::SignedUploadUrl) {}
 }
 
@@ -189,7 +188,10 @@ impl CommandHandler for NullCommandHandler {
     async fn handle(&self, command: pb::Command) -> CommandOutcome {
         CommandOutcome::failure(
             "NOT_IMPLEMENTED",
-            format!("command {} not implemented on this agent", command.command_id),
+            format!(
+                "command {} not implemented on this agent",
+                command.command_id
+            ),
         )
     }
 }
@@ -613,8 +615,7 @@ pub async fn run_agent<C, H, U>(
     hooks: U,
     mut pub_rx: mpsc::Receiver<pb::AgentFrame>,
     mut shutdown: watch::Receiver<bool>,
-)
-where
+) where
     C: AgentConnector,
     H: CommandHandler,
     U: ServerFrameHooks,
@@ -801,9 +802,18 @@ mod tests {
     /// explicit scheme is honored (http:// dev, https:// prod).
     #[test]
     fn normalize_endpoint_is_secure_by_default() {
-        assert_eq!(GrpcConnector::normalize_endpoint("hq.example:50051"), "https://hq.example:50051");
-        assert_eq!(GrpcConnector::normalize_endpoint("https://hq.example:50051"), "https://hq.example:50051");
-        assert_eq!(GrpcConnector::normalize_endpoint("http://hq-dev:50051"), "http://hq-dev:50051");
+        assert_eq!(
+            GrpcConnector::normalize_endpoint("hq.example:50051"),
+            "https://hq.example:50051"
+        );
+        assert_eq!(
+            GrpcConnector::normalize_endpoint("https://hq.example:50051"),
+            "https://hq.example:50051"
+        );
+        assert_eq!(
+            GrpcConnector::normalize_endpoint("http://hq-dev:50051"),
+            "http://hq-dev:50051"
+        );
     }
     use std::collections::VecDeque;
     use tokio::sync::Mutex as AsyncMutex;
@@ -920,7 +930,14 @@ mod tests {
         let (conn, _session) =
             MockConnector::with_session(VecDeque::from([Ok(pairing_result(true))]));
         let (tx, rx) = watch::channel(false);
-        let handle = tokio::spawn(run_agent(agent.clone(), conn, NullCommandHandler, (), mailbox_channel().1, rx));
+        let handle = tokio::spawn(run_agent(
+            agent.clone(),
+            conn,
+            NullCommandHandler,
+            (),
+            mailbox_channel().1,
+            rx,
+        ));
         tokio::time::sleep(Duration::from_millis(400)).await;
         tx.send(true).unwrap();
         handle.abort();
@@ -938,7 +955,14 @@ mod tests {
         let (conn, _session) =
             MockConnector::with_session(VecDeque::from([Ok(pairing_result(false))]));
         let (tx, rx) = watch::channel(false);
-        let handle = tokio::spawn(run_agent(agent.clone(), conn, NullCommandHandler, (), mailbox_channel().1, rx));
+        let handle = tokio::spawn(run_agent(
+            agent.clone(),
+            conn,
+            NullCommandHandler,
+            (),
+            mailbox_channel().1,
+            rx,
+        ));
         tokio::time::sleep(Duration::from_millis(300)).await;
         tx.send(true).unwrap();
         handle.abort();
@@ -958,7 +982,14 @@ mod tests {
         // stream open (no more frames) so the ticker fires at least once.
         let (conn, session) = MockConnector::with_session(VecDeque::from([Ok(heartbeat_ack(1))]));
         let (tx, rx) = watch::channel(false);
-        let handle = tokio::spawn(run_agent(agent.clone(), conn, NullCommandHandler, (), mailbox_channel().1, rx));
+        let handle = tokio::spawn(run_agent(
+            agent.clone(),
+            conn,
+            NullCommandHandler,
+            (),
+            mailbox_channel().1,
+            rx,
+        ));
         tokio::time::sleep(Duration::from_millis(1700)).await;
         tx.send(true).unwrap();
         handle.abort();
@@ -1000,7 +1031,14 @@ mod tests {
         let (conn, session) =
             MockConnector::with_session(VecDeque::from([Ok(command), Ok(heartbeat_ack(30))]));
         let (tx, rx) = watch::channel(false);
-        let handle = tokio::spawn(run_agent(agent.clone(), conn, NullCommandHandler, (), mailbox_channel().1, rx));
+        let handle = tokio::spawn(run_agent(
+            agent.clone(),
+            conn,
+            NullCommandHandler,
+            (),
+            mailbox_channel().1,
+            rx,
+        ));
         tokio::time::sleep(Duration::from_millis(300)).await;
         tx.send(true).unwrap();
         handle.abort();

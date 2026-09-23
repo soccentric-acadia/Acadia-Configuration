@@ -6,6 +6,9 @@ use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
+// Generated tonic/prost code: the full Instrumentation contract is mounted
+// (cross-references need every package), but webconfigd uses only part of it.
+#[allow(dead_code, clippy::all)]
 pub mod pb {
     /// The full Instrumentation contract tree: istate.proto references
     /// telemetry/faults/logmanager types (DeviceFrame payloads, StreamLogs
@@ -66,7 +69,10 @@ pub trait IstateClient: Send + Sync + 'static {
     /// Peer heartbeat to istate (Instrumentation §3.1): proves this daemon's
     /// event loop is turning so the hub reports the configuration peer as
     /// connected. Implementations without a live channel report Unavailable.
-    async fn heartbeat(&self, hb: pb::common::Heartbeat) -> Result<pb::common::HeartbeatAck, IstateError> {
+    async fn heartbeat(
+        &self,
+        hb: pb::common::Heartbeat,
+    ) -> Result<pb::common::HeartbeatAck, IstateError> {
         let _ = hb;
         Err(IstateError::Unavailable)
     }
@@ -269,11 +275,16 @@ impl IstateClient for GrpcIstateClient {
                 message: reply.message,
             });
         }
-        Ok(serde_json::from_str::<serde_json::Value>(&reply.json_payload)
-            .unwrap_or_else(|_| serde_json::json!({})))
+        Ok(
+            serde_json::from_str::<serde_json::Value>(&reply.json_payload)
+                .unwrap_or_else(|_| serde_json::json!({})),
+        )
     }
 
-    async fn heartbeat(&self, hb: pb::common::Heartbeat) -> Result<pb::common::HeartbeatAck, IstateError> {
+    async fn heartbeat(
+        &self,
+        hb: pb::common::Heartbeat,
+    ) -> Result<pb::common::HeartbeatAck, IstateError> {
         Ok(self
             .client
             .lock()

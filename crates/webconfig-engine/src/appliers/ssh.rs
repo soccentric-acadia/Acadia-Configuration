@@ -289,11 +289,17 @@ mod tests {
         c.system.ssh.authorized_keys =
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIILd+yzrE8pXGzq admin@laptop".into();
         a.apply(&sys, &c).unwrap();
-        assert!(dir.path().join("home/operator/.ssh/authorized_keys").exists());
+        assert!(dir
+            .path()
+            .join("home/operator/.ssh/authorized_keys")
+            .exists());
 
         c.system.ssh.authorized_keys = String::new();
         a.apply(&sys, &c).unwrap();
-        assert!(!dir.path().join("home/operator/.ssh/authorized_keys").exists());
+        assert!(!dir
+            .path()
+            .join("home/operator/.ssh/authorized_keys")
+            .exists());
     }
 
     #[test]

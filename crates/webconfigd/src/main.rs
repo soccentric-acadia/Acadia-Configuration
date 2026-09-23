@@ -91,14 +91,12 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(hq_agent::run_agent(
         pairing.clone(),
         hq_agent::GrpcConnector::default(),
-        hq_agent::IdempotentCommandHandler::new(
-            hq_command_handler::IstateCommandHandler::new(
-                state.istate.clone(),
-                state.audit.clone(),
-                ops.clone(),
-                mailbox_for_agent,
-            ),
-        ),
+        hq_agent::IdempotentCommandHandler::new(hq_command_handler::IstateCommandHandler::new(
+            state.istate.clone(),
+            state.audit.clone(),
+            ops.clone(),
+            mailbox_for_agent,
+        )),
         hq_bridge::UploadExecutor {
             coordinator: uploads,
             audit: state.audit.clone(),

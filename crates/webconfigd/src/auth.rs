@@ -56,7 +56,11 @@ fn ct_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         // Still burn a comparison pass so length alone doesn't short-circuit.
         let mut diff = 1u8;
-        for (x, y) in a.bytes().chain(std::iter::repeat(0)).zip(b.bytes().chain(std::iter::repeat(0))) {
+        for (x, y) in a
+            .bytes()
+            .chain(std::iter::repeat(0))
+            .zip(b.bytes().chain(std::iter::repeat(0)))
+        {
             diff &= !(x ^ y);
         }
         return diff == 0 && false;
@@ -129,11 +133,7 @@ impl LoginThrottle {
 
     /// Same gate with an explicit threshold (per-IP throttle uses a higher
     /// one than the per-username lockout).
-    pub async fn begin_attempt_limited(
-        &self,
-        key: &str,
-        threshold: u32,
-    ) -> AttemptDecision {
+    pub async fn begin_attempt_limited(&self, key: &str, threshold: u32) -> AttemptDecision {
         let username = key;
         let mut map = self.attempts.lock().await;
         if !map.contains_key(username) && map.len() >= MAX_TRACKED_USERNAMES {
@@ -192,12 +192,13 @@ pub async fn login(
     State(app): State<AppState>,
     throttle: State<Arc<LoginThrottle>>,
     session: Session,
-    mut req: axum::extract::Request,
+    req: axum::extract::Request,
 ) -> ApiResult<impl IntoResponse> {
     // Peer address is read before the body is consumed.
     let peer: Option<ClientAddr> = req.extensions().get::<ClientAddr>().cloned();
     use axum::extract::FromRequest;
-    let Json(req): Json<LoginRequest> = Json::from_request(req, &()).await
+    let Json(req): Json<LoginRequest> = Json::from_request(req, &())
+        .await
         .map_err(|e| ApiError::BadRequest(e.body_text()))?;
     // First-boot gate: no users yet → login is refused; the first-boot endpoint
     // is the only way forward (spec §4.8).

@@ -11,7 +11,7 @@
 //!    its protos, re-copy and update the constants here in the same change;
 //! 2. the service surface of `ConfigurationApi` (all 17 RPCs) by text scan.
 
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 const PINNED: &[(&str, &str)] = &[
     (

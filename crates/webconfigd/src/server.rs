@@ -179,11 +179,10 @@ async fn serve_connection(
     let io = TokioIo::new(tls);
     // T-P10: stamp the peer address as a request extension so the per-IP
     // login throttle (auth::ClientAddr) can key on the real source.
-    let tower_service = app
-        .map_request(move |mut req: http::Request<hyper::body::Incoming>| {
-            req.extensions_mut().insert(crate::auth::ClientAddr(peer));
-            req.map(axum::body::Body::new)
-        });
+    let tower_service = app.map_request(move |mut req: http::Request<hyper::body::Incoming>| {
+        req.extensions_mut().insert(crate::auth::ClientAddr(peer));
+        req.map(axum::body::Body::new)
+    });
     let hyper_service = TowerToHyperService::new(tower_service);
     let _ = ConnBuilder::new(TokioExecutor::new())
         .serve_connection_with_upgrades(io, hyper_service)
@@ -196,11 +195,10 @@ async fn serve_plain_connection(
     peer: std::net::SocketAddr,
 ) {
     let io = TokioIo::new(stream);
-    let tower_service = app
-        .map_request(move |mut req: http::Request<hyper::body::Incoming>| {
-            req.extensions_mut().insert(crate::auth::ClientAddr(peer));
-            req.map(axum::body::Body::new)
-        });
+    let tower_service = app.map_request(move |mut req: http::Request<hyper::body::Incoming>| {
+        req.extensions_mut().insert(crate::auth::ClientAddr(peer));
+        req.map(axum::body::Body::new)
+    });
     let hyper_service = TowerToHyperService::new(tower_service);
     let _ = ConnBuilder::new(TokioExecutor::new())
         .serve_connection_with_upgrades(io, hyper_service)

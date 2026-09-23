@@ -13,21 +13,24 @@
 
 /// Programs a request may execute. Everything else is rejected outright.
 pub const EXEC_PROGRAMS: &[&str] = &[
-    "systemctl",     // unit control (systemd-manager verbs, allowlisted below)
-    "hostnamectl",   // appliers/hostname.rs
-    "timedatectl",   // appliers/time.rs
-    "networkctl",    // appliers/networkd.rs, ap.rs
-    "nft",           // appliers/firewall.rs
-    "iw",            // appliers/wifi.rs (regulatory domain)
-    "wpa_cli",       // appliers/wifi.rs (reconfigure)
-    "wg",            // appliers/wireguard.rs (genkey)
-    "wg-quick",      // appliers/wireguard.rs (up/down)
-    "rauc",          // engine/update.rs (RAUC backend; SWUpdate is T-P26)
-    "gpioget",       // webconfigd api/io.rs (device access via the helper)
-    "gpioset",       // webconfigd api/io.rs
-    "i2cdetect",     // webconfigd api/io.rs (bus scan)
-    "pico-flash",    // board manifest flash_command (MCU firmware flash)
-    "journalctl",    // webconfigd Logs page read queries (fixed flag set)
+    "systemctl",       // unit control (systemd-manager verbs, allowlisted below)
+    "hostnamectl",     // appliers/hostname.rs
+    "timedatectl",     // appliers/time.rs
+    "networkctl",      // appliers/networkd.rs, ap.rs
+    "nft",             // appliers/firewall.rs
+    "iw",              // appliers/wifi.rs (regulatory domain)
+    "wpa_cli",         // appliers/wifi.rs (reconfigure)
+    "wg",              // appliers/wireguard.rs (genkey)
+    "wg-quick",        // appliers/wireguard.rs (up/down)
+    "rauc",            // engine/update.rs (RAUC backend)
+    "swupdate-client", // engine/update.rs SWUpdate backend: daemon IPC install (T-P26)
+    "swupdate",        // engine/update.rs SWUpdate backend: one-shot `-i` fallback (T-P26)
+    "gpioget",         // webconfigd api/io.rs (device access via the helper)
+    "gpioset",         // webconfigd api/io.rs
+    "i2cdetect",       // webconfigd api/io.rs (bus scan + listing, CFG-040)
+    "mmc",             // engine/monitoring.rs eMMC wear fallback (read-only, CFG-041)
+    "pico-flash",      // board manifest flash_command (MCU firmware flash)
+    "journalctl",      // webconfigd Logs page read queries (fixed flag set)
 ];
 
 /// systemctl verbs that take no unit argument.
@@ -35,7 +38,13 @@ const SYSTEMCTL_NO_UNIT: &[&str] = &["daemon-reload", "reboot", "poweroff", "is-
 
 /// systemctl verbs that take exactly one unit argument (plus optional flags).
 const SYSTEMCTL_UNIT_VERBS: &[&str] = &[
-    "start", "stop", "restart", "reload", "try-restart", "enable", "disable",
+    "start",
+    "stop",
+    "restart",
+    "reload",
+    "try-restart",
+    "enable",
+    "disable",
 ];
 
 /// Fixed units any applier may drive (appliers/ssh, time, networkd, ap,
@@ -84,9 +93,9 @@ fn unit_allowed(unit: &str) -> bool {
             // The dynamic part must be a sane device/unit token: alphanumerics,
             // '-' '@' '.' '_' '+' — never '/' or whitespace.
             if !rest.is_empty()
-                && rest
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'@' | b'.' | b'_' | b'+'))
+                && rest.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'@' | b'.' | b'_' | b'+')
+                })
             {
                 return true;
             }
@@ -176,6 +185,21 @@ pub fn exec_allowed(program: &str, args: &[String]) -> bool {
         "wg" => args == ["genkey"],
         "wg-quick" => args == ["up", "wg0"] || args == ["down", "wg0"],
         "rauc" => rauc_args_allowed(args),
+        // T-P26 (K06): hand a staged bundle to the running SWUpdate daemon.
+        "swupdate-client" => args.len() == 1 && bundle_path_allowed(&args[0]),
+        // T-P26 (K06, CFG-038): one-shot LOCAL install — exactly
+        // `-f <cfg> -k <pubkey> -i <bundle>` (`-i` installs a local file;
+        // `-u` was the wrong flag). The key is mandatory, so a one-shot
+        // install can never skip signature verification.
+        "swupdate" => {
+            args.len() == 6
+                && args[0] == "-f"
+                && args[1] == SWUPDATE_CFG
+                && args[2] == "-k"
+                && args[3] == SWUPDATE_PUBKEY
+                && args[4] == "-i"
+                && bundle_path_allowed(&args[5])
+        }
         // Read-only journal queries from the Logs page: -u <unit> | -b | -n<N>
         // | -o <fmt> | --no-pager | --since/--until — a fixed flag set, never
         // an open passthrough (a stray --vacuum-size would delete logs).
@@ -187,9 +211,20 @@ pub fn exec_allowed(program: &str, args: &[String]) -> bool {
                 && args.len() <= 3
                 && args.iter().all(|a| {
                     !a.starts_with('-')
-                        && a.bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'=' | b'@' | b'/' | b'+'))
+                        && a.bytes().all(|b| {
+                            b.is_ascii_alphanumeric()
+                                || matches!(b, b'-' | b'_' | b'.' | b'=' | b'@' | b'/' | b'+')
+                        })
                 })
+        }
+        // CFG-041: read-only EXT_CSD dump of one eMMC block device.
+        "mmc" => {
+            args.len() == 3
+                && args[0] == "extcsd"
+                && args[1] == "read"
+                && args[2]
+                    .strip_prefix("/dev/mmcblk")
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
         }
         "i2cdetect" => {
             args.len() == 2 && args[0] == "-y" && args[1].bytes().all(|b| b.is_ascii_digit())
@@ -248,9 +283,9 @@ fn timedatectl_args_allowed(args: &[String]) -> bool {
     }
     if args.len() == 2 && args[0] == "set-time" {
         // ISO-8601-ish: digits and separators only.
-        return args[1]
-            .bytes()
-            .all(|b| b.is_ascii_digit() || matches!(b, b'-' | b':' | b'T' | b' ' | b'.' | b'Z' | b'+'));
+        return args[1].bytes().all(|b| {
+            b.is_ascii_digit() || matches!(b, b'-' | b':' | b'T' | b' ' | b'.' | b'Z' | b'+')
+        });
     }
     false
 }
@@ -266,6 +301,35 @@ fn nft_args_allowed(args: &[String]) -> bool {
         return path.starts_with("/etc/nftables.d/") && !path.contains("..");
     }
     false
+}
+
+/// SWUpdate configuration and signing key the one-shot install must use
+/// (installed by meta-acadia's rpi5-swupdate-config).
+pub const SWUPDATE_CFG: &str = "/etc/swupdate/swupdate.cfg";
+pub const SWUPDATE_PUBKEY: &str = "/etc/swupdate/swupdate-public.pem";
+
+/// Directories an update bundle may be installed from: webconfigd's own data
+/// dir (upload staging, HQ downloads) — `/pst/webconfig` on A/B boards
+/// (T-P01), the legacy/non-A/B locations otherwise.
+pub const BUNDLE_DIRS: &[&str] = &["/pst/webconfig/", "/var/lib/webconfig/", "/data/webconfig/"];
+
+/// Whether a bundle path is a plain file path inside [`BUNDLE_DIRS`].
+pub fn bundle_path_allowed(path: &str) -> bool {
+    !path.starts_with('-')
+        && !path.contains("..")
+        && !path.contains('\0')
+        && BUNDLE_DIRS
+            .iter()
+            .any(|d| path.starts_with(d) && path.len() > d.len())
+}
+
+/// Boot slots `boot_select` may point `/boot/autoboot.txt` at (OS-016
+/// tryboot layout: per-slot boot dirs `/boot/A`, `/boot/B`).
+pub const BOOT_SLOTS: &[&str] = &["A", "B"];
+
+/// Whether `slot` is a valid tryboot slot directory name.
+pub fn boot_slot_allowed(slot: &str) -> bool {
+    BOOT_SLOTS.contains(&slot)
 }
 
 fn rauc_args_allowed(args: &[String]) -> bool {
@@ -366,38 +430,86 @@ mod tests {
     #[test]
     fn systemctl_unit_allowlist() {
         assert!(exec_allowed("systemctl", &s(&["restart", "sshd.service"])));
-        assert!(exec_allowed("systemctl", &s(&["enable", "--now", "hostapd.service"])));
+        assert!(exec_allowed(
+            "systemctl",
+            &s(&["enable", "--now", "hostapd.service"])
+        ));
         assert!(exec_allowed("systemctl", &s(&["daemon-reload"])));
-        assert!(exec_allowed("systemctl", &s(&["reboot", "--reboot-argument=0 tryboot"])));
-        assert!(exec_allowed("systemctl", &s(&["enable", "can-can0.service"])));
-        assert!(exec_allowed("systemctl", &s(&["start", "webconfig-serial-ttyAMA10.service"])));
-        assert!(exec_allowed("systemctl", &s(&["restart", "webconfig-gpio-led0.service"])));
-        assert!(exec_allowed("systemctl", &s(&["start", "serial-getty@ttyS0.service"])));
-        assert!(exec_allowed("systemctl", &s(&["restart", "ptp4l@eth0.service"])));
-        assert!(exec_allowed("systemctl", &s(&["restart", "chrony.service"])));
+        assert!(exec_allowed(
+            "systemctl",
+            &s(&["reboot", "--reboot-argument=0 tryboot"])
+        ));
+        assert!(exec_allowed(
+            "systemctl",
+            &s(&["enable", "can-can0.service"])
+        ));
+        assert!(exec_allowed(
+            "systemctl",
+            &s(&["start", "webconfig-serial-ttyAMA10.service"])
+        ));
+        assert!(exec_allowed(
+            "systemctl",
+            &s(&["restart", "webconfig-gpio-led0.service"])
+        ));
+        assert!(exec_allowed(
+            "systemctl",
+            &s(&["start", "serial-getty@ttyS0.service"])
+        ));
+        assert!(exec_allowed(
+            "systemctl",
+            &s(&["restart", "ptp4l@eth0.service"])
+        ));
+        assert!(exec_allowed(
+            "systemctl",
+            &s(&["restart", "chrony.service"])
+        ));
         assert!(exec_allowed(
             "systemctl",
             &s(&["show", "webconfigd.service", "--property=LoadState"])
         ));
         assert!(!exec_allowed("systemctl", &s(&["start", "sshd"])));
-        assert!(!exec_allowed("systemctl", &s(&["start", "../../evil.service"])));
+        assert!(!exec_allowed(
+            "systemctl",
+            &s(&["start", "../../evil.service"])
+        ));
         assert!(!exec_allowed("systemctl", &s(&["start", "evil.service"])));
         assert!(!exec_allowed("systemctl", &s(&["mask", "sshd.service"])));
-        assert!(!exec_allowed("systemctl", &s(&["enable", "a.service", "b.service"])));
+        assert!(!exec_allowed(
+            "systemctl",
+            &s(&["enable", "a.service", "b.service"])
+        ));
     }
 
     #[test]
     fn time_and_network_verbs() {
-        assert!(exec_allowed("hostnamectl", &s(&["set-hostname", "acadia-01"])));
+        assert!(exec_allowed(
+            "hostnamectl",
+            &s(&["set-hostname", "acadia-01"])
+        ));
         assert!(!exec_allowed("hostnamectl", &s(&["set-hostname", "a b"])));
-        assert!(exec_allowed("timedatectl", &s(&["set-timezone", "Europe/Oslo"])));
+        assert!(exec_allowed(
+            "timedatectl",
+            &s(&["set-timezone", "Europe/Oslo"])
+        ));
         assert!(exec_allowed("timedatectl", &s(&["set-ntp", "false"])));
-        assert!(exec_allowed("timedatectl", &s(&["set-time", "2026-09-23 10:00:00"])));
-        assert!(!exec_allowed("timedatectl", &s(&["set-timezone", "../../etc"])));
+        assert!(exec_allowed(
+            "timedatectl",
+            &s(&["set-time", "2026-09-23 10:00:00"])
+        ));
+        assert!(!exec_allowed(
+            "timedatectl",
+            &s(&["set-timezone", "../../etc"])
+        ));
         assert!(exec_allowed("networkctl", &s(&["reload"])));
         assert!(!exec_allowed("networkctl", &s(&["delete", "eth0"])));
-        assert!(exec_allowed("nft", &s(&["-f", "/etc/nftables.d/webconfig.nft"])));
-        assert!(exec_allowed("nft", &s(&["delete", "table", "inet", "webconfig"])));
+        assert!(exec_allowed(
+            "nft",
+            &s(&["-f", "/etc/nftables.d/webconfig.nft"])
+        ));
+        assert!(exec_allowed(
+            "nft",
+            &s(&["delete", "table", "inet", "webconfig"])
+        ));
         assert!(!exec_allowed("nft", &s(&["-f", "/tmp/evil.nft"])));
         assert!(exec_allowed("iw", &s(&["reg", "set", "NO"])));
         assert!(exec_allowed("wpa_cli", &s(&["reconfigure"])));
@@ -408,7 +520,10 @@ mod tests {
 
     #[test]
     fn journalctl_read_only() {
-        assert!(exec_allowed("journalctl", &s(&["-u", "sshd.service", "-n100", "--no-pager"])));
+        assert!(exec_allowed(
+            "journalctl",
+            &s(&["-u", "sshd.service", "-n100", "--no-pager"])
+        ));
         assert!(!exec_allowed("journalctl", &s(&["--vacuum-size=0"])));
     }
 
@@ -443,6 +558,77 @@ mod tests {
         ] {
             assert!(!path_allowed(std::path::Path::new(p)), "must reject {p}");
         }
+    }
+
+    #[test]
+    fn swupdate_install_verbs() {
+        assert!(exec_allowed(
+            "swupdate-client",
+            &s(&["/pst/webconfig/uploads/x.swu"])
+        ));
+        assert!(!exec_allowed("swupdate-client", &s(&["/tmp/x.swu"])));
+        assert!(!exec_allowed(
+            "swupdate-client",
+            &s(&["/pst/webconfig/../../etc/shadow"])
+        ));
+        assert!(!exec_allowed("swupdate-client", &s(&["-h"])));
+        let ok = s(&[
+            "-f",
+            SWUPDATE_CFG,
+            "-k",
+            SWUPDATE_PUBKEY,
+            "-i",
+            "/pst/webconfig/hq/u.swu",
+        ]);
+        assert!(exec_allowed("swupdate", &ok));
+        // CFG-038: -u is not a local install and never passes
+        assert!(!exec_allowed(
+            "swupdate",
+            &s(&["-u", "/pst/webconfig/u.swu"])
+        ));
+        // signature key is mandatory
+        assert!(!exec_allowed(
+            "swupdate",
+            &s(&["-f", SWUPDATE_CFG, "-i", "/pst/webconfig/u.swu"])
+        ));
+        assert!(!exec_allowed(
+            "swupdate",
+            &s(&[
+                "-f",
+                SWUPDATE_CFG,
+                "-k",
+                "/tmp/evil.pem",
+                "-i",
+                "/pst/webconfig/u.swu"
+            ])
+        ));
+    }
+
+    #[test]
+    fn mmc_extcsd_read_only() {
+        assert!(exec_allowed("mmc", &s(&["extcsd", "read", "/dev/mmcblk0"])));
+        assert!(!exec_allowed(
+            "mmc",
+            &s(&["extcsd", "write", "/dev/mmcblk0"])
+        ));
+        assert!(!exec_allowed("mmc", &s(&["extcsd", "read", "/dev/sda"])));
+        assert!(!exec_allowed(
+            "mmc",
+            &s(&["extcsd", "read", "/dev/mmcblk0p1"])
+        ));
+        assert!(!exec_allowed(
+            "mmc",
+            &s(&["bkops", "enable", "/dev/mmcblk0"])
+        ));
+    }
+
+    #[test]
+    fn boot_slots() {
+        assert!(boot_slot_allowed("A"));
+        assert!(boot_slot_allowed("B"));
+        assert!(!boot_slot_allowed("a"));
+        assert!(!boot_slot_allowed("../A"));
+        assert!(!boot_slot_allowed(""));
     }
 
     #[test]

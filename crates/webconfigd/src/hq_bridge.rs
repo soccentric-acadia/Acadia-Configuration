@@ -27,8 +27,8 @@ use base64::Engine;
 use hq_agent::pb;
 use hq_agent::{AgentMailbox, CommandOutcome};
 use tokio::sync::watch;
-use webconfig_engine::audit::{AuditEntry, AuditLog};
 use webconfig_engine::applier::ApplyOutcome;
+use webconfig_engine::audit::{AuditEntry, AuditLog};
 use webconfig_engine::store::ConfigFile;
 use webconfig_engine::update::UpdateBackend;
 use webconfig_engine::Sysroot;
@@ -62,7 +62,11 @@ fn ed25519_pubkey_bytes(input: &str) -> Result<Vec<u8>, String> {
             .decode(b64.as_bytes())
             .map_err(|_| "public key PEM body is not base64".to_string())?;
         // RFC 8410: 0x30 0x2a 0x30 0x05 0x06 0x03 0x2b 0x65 0x70 0x03 0x21 0x00
-        if der.len() == 44 && der.starts_with(&[0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00]) {
+        if der.len() == 44
+            && der.starts_with(&[
+                0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+            ])
+        {
             return Ok(der[12..].to_vec());
         }
         return Err("public key PEM is not an Ed25519 SubjectPublicKeyInfo".into());
@@ -185,7 +189,9 @@ fn section_value(
         "io" => serde_json::to_value(&cfg.io),
         "app_settings" => serde_json::to_value(&cfg.app_settings),
         other => {
-            return Err(StoreError::Validation(format!("unknown config section {other}")));
+            return Err(StoreError::Validation(format!(
+                "unknown config section {other}"
+            )));
         }
     };
     v.map_err(|e| StoreError::Validation(format!("section serialize: {e}")))
@@ -193,10 +199,7 @@ fn section_value(
 
 /// Deep merge `incoming` over `current`: objects merge recursively, every
 /// other type replaces. Absent fields keep their current value (T-P18).
-fn deep_merge(
-    current: serde_json::Value,
-    incoming: serde_json::Value,
-) -> serde_json::Value {
+fn deep_merge(current: serde_json::Value, incoming: serde_json::Value) -> serde_json::Value {
     match (current, incoming) {
         (serde_json::Value::Object(mut a), serde_json::Value::Object(b)) => {
             for (k, v) in b {
@@ -237,7 +240,10 @@ impl UploadCoordinator {
 
     /// Register an upload awaiting its presigned URL.
     pub fn register(&self, upload: PendingUpload) {
-        self.pending.lock().expect("upload queue lock").push_back(upload);
+        self.pending
+            .lock()
+            .expect("upload queue lock")
+            .push_back(upload);
     }
 
     /// Pop the oldest pending upload of @p kind, falling back to the oldest
@@ -307,7 +313,10 @@ impl hq_agent::ServerFrameHooks for UploadExecutor {
                 .unwrap_or_default(),
             user: "hq".into(),
             action: "upload".into(),
-            detail: Some(format!("{request_ref}: {}", if ok { "uploaded" } else { "failed" })),
+            detail: Some(format!(
+                "{request_ref}: {}",
+                if ok { "uploaded" } else { "failed" }
+            )),
         });
         if ok {
             tracing::info!(request_ref = %request_ref, "upload complete");
@@ -335,7 +344,10 @@ impl DeviceOps {
     /// `GET /updates/backup` returns: secrets never leave the device
     /// unencrypted, and HQ never receives them (spec §4.4).
     fn backup_document(&self) -> Result<serde_json::Value, String> {
-        let mut cfg = self.engine.load().map_err(|e| format!("config load failed: {e}"))?;
+        let mut cfg = self
+            .engine
+            .load()
+            .map_err(|e| format!("config load failed: {e}"))?;
         crate::api::updates::redact_secrets(&mut cfg, &self.schema);
         Ok(serde_json::json!({
             "schema_version": webconfig_engine::CONFIG_SCHEMA_VERSION,
@@ -348,7 +360,9 @@ impl DeviceOps {
     /// contract document (schema_version + config tree, secrets redacted).
     pub async fn read_configuration(&self) -> CommandOutcome {
         match self.backup_document() {
-            Ok(doc) => CommandOutcome::ok_json("OK", serde_json::to_string(&doc).unwrap_or_default()),
+            Ok(doc) => {
+                CommandOutcome::ok_json("OK", serde_json::to_string(&doc).unwrap_or_default())
+            }
             Err(e) => CommandOutcome::failure("INTERNAL", e),
         }
     }
@@ -388,13 +402,17 @@ impl DeviceOps {
                         .map(|v: webconfig_engine::store::network::NetworkConfig| cfg.network = v)
                         .map_err(webconfig_engine::StoreError::Parse),
                     "services" => serde_json::from_value(merged)
-                        .map(|v: webconfig_engine::store::services::ServicesConfig| cfg.services = v)
+                        .map(|v: webconfig_engine::store::services::ServicesConfig| {
+                            cfg.services = v
+                        })
                         .map_err(webconfig_engine::StoreError::Parse),
                     "updates" => serde_json::from_value(merged)
                         .map(|v: webconfig_engine::store::updates::UpdatesConfig| cfg.updates = v)
                         .map_err(webconfig_engine::StoreError::Parse),
                     "monitoring" => serde_json::from_value(merged)
-                        .map(|v: webconfig_engine::store::monitoring::MonitoringConfig| cfg.monitoring = v)
+                        .map(|v: webconfig_engine::store::monitoring::MonitoringConfig| {
+                            cfg.monitoring = v
+                        })
                         .map_err(webconfig_engine::StoreError::Parse),
                     "logs" => serde_json::from_value(merged)
                         .map(|v: webconfig_engine::store::logs::LogsConfig| cfg.logs = v)
@@ -403,16 +421,18 @@ impl DeviceOps {
                         .map(|v: webconfig_engine::store::alerts::AlertsConfig| cfg.alerts = v)
                         .map_err(webconfig_engine::StoreError::Parse),
                     "security" => serde_json::from_value(merged)
-                        .map(|v: webconfig_engine::store::security::SecurityConfig| cfg.security = v)
+                        .map(|v: webconfig_engine::store::security::SecurityConfig| {
+                            cfg.security = v
+                        })
                         .map_err(webconfig_engine::StoreError::Parse),
                     "io" => serde_json::from_value(merged)
                         .map(|v: webconfig_engine::store::io::IoConfig| cfg.io = v)
                         .map_err(webconfig_engine::StoreError::Parse),
-                    "app_settings" => serde_json::from_value::<
-                        serde_json::Map<String, serde_json::Value>,
-                    >(merged)
-                    .map(|v| cfg.app_settings = v)
-                    .map_err(webconfig_engine::StoreError::Parse),
+                    "app_settings" => {
+                        serde_json::from_value::<serde_json::Map<String, serde_json::Value>>(merged)
+                            .map(|v| cfg.app_settings = v)
+                            .map_err(webconfig_engine::StoreError::Parse)
+                    }
                     other => Err(webconfig_engine::StoreError::Validation(format!(
                         "unknown config section {other}"
                     ))),
@@ -471,7 +491,7 @@ impl DeviceOps {
         let mut ids: Vec<&str> = Vec::new();
         for s in sections {
             for id in section_appliers(s) {
-                if !ids.contains(&id) {
+                if !ids.contains(id) {
                     ids.push(id);
                 }
             }
@@ -538,17 +558,19 @@ impl DeviceOps {
             return CommandOutcome::failure("INTERNAL", format!("backup write: {e}"));
         }
         self.coordinator.register(PendingUpload {
-            kind: pb::log_upload_request::Kind::Backup.into(),
+            kind: pb::log_upload_request::Kind::Backup,
             path: path.clone(),
             size_bytes: body.len() as u64,
         });
         let sent = mailbox.try_publish(pb::AgentFrame {
-            body: Some(pb::agent_frame::Body::LogUploadRequest(pb::LogUploadRequest {
-                kind: pb::log_upload_request::Kind::Backup.into(),
-                time_range_start_unix_ms: 0,
-                time_range_end_unix_ms: 0,
-                size_bytes_estimate: body.len() as i64,
-            })),
+            body: Some(pb::agent_frame::Body::LogUploadRequest(
+                pb::LogUploadRequest {
+                    kind: pb::log_upload_request::Kind::Backup.into(),
+                    time_range_start_unix_ms: 0,
+                    time_range_end_unix_ms: 0,
+                    size_bytes_estimate: body.len() as i64,
+                },
+            )),
         });
         CommandOutcome::ok_json(
             "OK",
@@ -639,7 +661,10 @@ impl DeviceOps {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         if url.is_empty() {
-            return CommandOutcome::failure("INVALID_ARGUMENT", "artifact_download_url is required");
+            return CommandOutcome::failure(
+                "INVALID_ARGUMENT",
+                "artifact_download_url is required",
+            );
         }
         if expected.len() != 64 {
             return CommandOutcome::failure(
@@ -686,7 +711,8 @@ impl DeviceOps {
         }
         let bundle_path = path.to_string_lossy().to_string();
         let backend = self.update_backend.clone();
-        let verified = tokio::task::spawn_blocking(move || backend.verify_bundle(&bundle_path)).await;
+        let verified =
+            tokio::task::spawn_blocking(move || backend.verify_bundle(&bundle_path)).await;
         let manifest = match verified {
             Ok(Ok(m)) => m,
             Ok(Err(e)) => {
@@ -761,10 +787,13 @@ impl DeviceOps {
             .map_err(|e| format!("bulk fetch: {e}"))?;
         let dir = self.sysroot.webconfig_dir().join("hq-uploads");
         std::fs::create_dir_all(&dir).map_err(|e| format!("upload dir: {e}"))?;
-        let path = dir.join(format!("bundle-{}", handle_for_path.trim_start_matches('/')));
+        let path = dir.join(format!(
+            "bundle-{}",
+            handle_for_path.trim_start_matches('/')
+        ));
         std::fs::write(&path, &bytes).map_err(|e| format!("bundle write: {e}"))?;
         Ok(PendingUpload {
-            kind: pb::log_upload_request::Kind::LogBundle.into(),
+            kind: pb::log_upload_request::Kind::LogBundle,
             path,
             size_bytes: bytes.len() as u64,
         })
@@ -924,12 +953,14 @@ async fn forward_bundle(ops: &DeviceOps, mailbox: &AgentMailbox, payload: &str) 
     let size = upload.size_bytes as i64;
     ops.coordinator.register(upload);
     let frame = pb::AgentFrame {
-        body: Some(pb::agent_frame::Body::LogUploadRequest(pb::LogUploadRequest {
-            kind: pb::log_upload_request::Kind::LogBundle.into(),
-            time_range_start_unix_ms: 0,
-            time_range_end_unix_ms: 0,
-            size_bytes_estimate: size,
-        })),
+        body: Some(pb::agent_frame::Body::LogUploadRequest(
+            pb::LogUploadRequest {
+                kind: pb::log_upload_request::Kind::LogBundle.into(),
+                time_range_start_unix_ms: 0,
+                time_range_end_unix_ms: 0,
+                size_bytes_estimate: size,
+            },
+        )),
     };
     if !mailbox.try_publish(frame) {
         tracing::debug!("log upload request dropped (agent offline or saturated)");
