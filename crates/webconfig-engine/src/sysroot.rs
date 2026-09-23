@@ -57,14 +57,28 @@ impl Sysroot {
         self.root.join(rel)
     }
 
-    /// The writable data partition root (spec §2: mutable state lives on the
-    /// data partition, e.g. `/data`). Resolved from `WEBCONFIG_DATA_DIR` so the
-    /// dev `make run` target and tests can redirect it to a tempdir.
+    /// The writable data partition root. Resolution order:
+    ///
+    /// 1. `WEBCONFIG_DATA_DIR` — dev `make run` and tests redirect it to a
+    ///    tempdir; the override always wins.
+    /// 2. The persistent `/pst` store partition (task 003, T-P01) when it
+    ///    exists under this sysroot — mutable state (config store, web-UI
+    ///    users, HQ pairing credential, TLS identity) must survive OTA slot
+    ///    switches, so it lives on `/pst`, never on the A/B rootfs. On real
+    ///    devices `/pst` is either the mounted p4 partition (pst.mount) or
+    ///    the plain rootfs fallback directory the acadia-pst-init recipe
+    ///    ships — the same convention istate uses.
+    /// 3. `/data` — the pre-T-P01 default, kept for fake sysroots and
+    ///    deployments without the `/pst` partition.
     pub fn data_dir(&self) -> PathBuf {
         if let Ok(dir) = std::env::var("WEBCONFIG_DATA_DIR") {
             return PathBuf::from(dir);
         }
-        self.join("/data")
+        if self.join("/pst").is_dir() {
+            self.join("/pst")
+        } else {
+            self.join("/data")
+        }
     }
 
     /// `/data/webconfig` — the canonical mutable state directory.
@@ -108,5 +122,46 @@ mod tests {
     fn relative_guest_path_panics() {
         let s = Sysroot::at("/tmp/fake");
         let _ = s.join("etc/hostname");
+    }
+
+    /// Serialise the WEBCONFIG_DATA_DIR env manipulation (tests run on
+    /// threads sharing one process environment).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// T-P01: the mutable store lives on the persistent /pst partition when
+    /// the sysroot carries it (real device or simulated fake root).
+    #[test]
+    fn data_dir_uses_pst_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("pst")).unwrap();
+        let s = Sysroot::at(tmp.path());
+        assert_eq!(s.data_dir(), tmp.path().join("pst"));
+        // The whole WebConfig state tree hangs off it (config.db, users,
+        // pairing.json, TLS identity) — one redirect point covers all.
+        assert_eq!(s.webconfig_dir(), tmp.path().join("pst").join("webconfig"));
+    }
+
+    #[test]
+    fn data_dir_falls_back_to_data_without_pst() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = Sysroot::at(tmp.path());
+        assert_eq!(s.data_dir(), tmp.path().join("data"));
+        assert_eq!(s.webconfig_dir(), tmp.path().join("data").join("webconfig"));
+    }
+
+    /// T-P01: the env override still wins over the /pst detection — the dev
+    /// `make run` target must keep redirecting to ./data even though the
+    /// workspace happens to contain a data/ directory.
+    #[test]
+    fn env_override_wins_over_pst() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("pst")).unwrap();
+        let s = Sysroot::at(tmp.path());
+        let redirect = tempfile::tempdir().unwrap();
+        std::env::set_var("WEBCONFIG_DATA_DIR", redirect.path());
+        let dir = s.data_dir();
+        std::env::remove_var("WEBCONFIG_DATA_DIR");
+        assert_eq!(dir, redirect.path());
     }
 }

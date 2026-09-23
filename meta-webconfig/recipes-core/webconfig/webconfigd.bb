@@ -73,6 +73,10 @@ do_install:append() {
     install -m 0755 ${B}/release/webconfigd ${D}${bindir}/webconfigd
 
     # Data partition owned by the runtime user (config.json, users.json, certs).
+    # T-P01: the daemon's store now lives on /pst/webconfig (persistent),
+    # provisioned by acadia-pst-init at boot; this legacy dir stays as the
+    # migration source (acadia-pst-init.sh copies pre-T-P01 state into /pst
+    # on the first boot after the upgrade) and as the account's home dir.
     install -d -o ${WEBCONFIG_USER} -g ${WEBCONFIG_GROUP} ${D}/var/lib/webconfig
 
     # Hardened systemd unit + environment.

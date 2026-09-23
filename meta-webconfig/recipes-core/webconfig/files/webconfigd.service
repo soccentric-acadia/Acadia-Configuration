@@ -7,6 +7,13 @@
 Description=SoCcentric on-device WebConfig daemon
 After=network.target systemd-networkd.service
 Wants=network.target
+# T-P01: the daemon's mutable state (data_dir = /pst/webconfig when /pst is
+# present — config store, web-UI users, HQ pairing credential, TLS identity)
+# lives on the persistent /pst partition. Order after its mount unit; on
+# devices without the partition pst.mount is condition-skipped and this
+# dependency falls through to the root mount (same pattern as
+# instr-istate.service).
+RequiresMountsFor=/pst
 
 [Service]
 Type=simple
@@ -17,9 +24,12 @@ ExecStart=/usr/bin/webconfigd
 
 # --- Hardening (spec §4.8) ---------------------------------------------------
 # Read-only root + /usr; the daemon may only write its data partition.
+# T-P01: that partition is /pst/webconfig (persistent across OTA). The '-'
+# prefix ignores the path on deployments without the /pst partition, where
+# the daemon falls back to the (non-persistent) /data/webconfig default.
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/webconfig
+ReadWritePaths=-/pst/webconfig
 # No new privileges; no executing setuid binaries.
 NoNewPrivileges=true
 # Drop all capabilities except the ones genuinely needed (none for v1: the
