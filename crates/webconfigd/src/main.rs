@@ -103,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
         hq_bridge::UploadExecutor {
             coordinator: uploads,
             audit: state.audit.clone(),
+            mailbox: mailbox.clone(),
         },
         pub_rx,
         agent_stop_rx,

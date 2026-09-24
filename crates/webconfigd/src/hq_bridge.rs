@@ -235,16 +235,40 @@ pub struct PendingUpload {
     pub kind: pb::log_upload_request::Kind,
     pub path: PathBuf,
     pub size_bytes: u64,
+    /// T-P22: correlation id sent in `LogUploadRequest.client_ref` and echoed
+    /// in `SignedUploadUrl`; assigned by [`UploadCoordinator::register`].
+    pub client_ref: String,
+}
+
+/// The `LogUploadRequest` frame announcing a registered upload (T-P22).
+pub fn upload_request_frame(
+    upload_kind: pb::log_upload_request::Kind,
+    size: u64,
+    client_ref: &str,
+) -> pb::AgentFrame {
+    pb::AgentFrame {
+        body: Some(pb::agent_frame::Body::LogUploadRequest(
+            pb::LogUploadRequest {
+                kind: upload_kind.into(),
+                time_range_start_unix_ms: 0,
+                time_range_end_unix_ms: 0,
+                size_bytes_estimate: size as i64,
+                client_ref: client_ref.to_string(),
+            },
+        )),
+    }
 }
 
 /// Registry of uploads created by the device that await a presigned URL.
 ///
-/// `LogUploadRequest` carries no client-side request id (the gateway's
-/// `request_ref` is its own object id), so a URL is matched to the oldest
-/// pending upload, in order. Overlapping requests queue in FIFO order.
+/// T-P22: each upload gets a `client_ref` the gateway echoes in its
+/// `SignedUploadUrl`, so a URL is matched to exactly its blob. A pre-T-P22
+/// gateway echoes nothing; then the oldest upload of the URL's kind (else
+/// the oldest of any kind) is taken, as before.
 #[derive(Default)]
 pub struct UploadCoordinator {
     pending: Mutex<VecDeque<PendingUpload>>,
+    next_ref: std::sync::atomic::AtomicU64,
 }
 
 impl UploadCoordinator {
@@ -252,12 +276,37 @@ impl UploadCoordinator {
         Self::default()
     }
 
-    /// Register an upload awaiting its presigned URL.
-    pub fn register(&self, upload: PendingUpload) {
+    /// Register an upload awaiting its presigned URL; returns its client_ref.
+    pub fn register(&self, mut upload: PendingUpload) -> String {
+        if upload.client_ref.is_empty() {
+            let n = self
+                .next_ref
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            upload.client_ref = format!("{}-{n}", now_unix_ms());
+        }
+        let client_ref = upload.client_ref.clone();
         self.pending
             .lock()
             .expect("upload queue lock")
             .push_back(upload);
+        client_ref
+    }
+
+    /// Pop the upload a `SignedUploadUrl` answers: by client_ref when the
+    /// gateway echoed one, else positionally by kind (pre-T-P22 gateway).
+    pub fn take_for(
+        &self,
+        client_ref: &str,
+        kind: pb::log_upload_request::Kind,
+    ) -> Option<PendingUpload> {
+        if !client_ref.is_empty() {
+            let mut q = self.pending.lock().expect("upload queue lock");
+            if let Some(i) = q.iter().position(|p| p.client_ref == client_ref) {
+                return q.remove(i);
+            }
+            return None;
+        }
+        self.take(kind)
     }
 
     /// Pop the oldest pending upload of @p kind, falling back to the oldest
@@ -286,13 +335,16 @@ impl UploadCoordinator {
 pub struct UploadExecutor {
     pub coordinator: Arc<UploadCoordinator>,
     pub audit: Arc<AuditLog>,
+    /// T-P22: publishes the `UploadComplete` report after each PUT.
+    pub mailbox: AgentMailbox,
 }
 
 #[async_trait::async_trait]
 impl hq_agent::ServerFrameHooks for UploadExecutor {
     async fn on_signed_upload_url(&self, url: pb::SignedUploadUrl) {
-        let kind = pb::log_upload_request::Kind::LogBundle;
-        let pending = match self.coordinator.take(kind) {
+        let kind = pb::log_upload_request::Kind::try_from(url.kind)
+            .unwrap_or(pb::log_upload_request::Kind::LogBundle);
+        let pending = match self.coordinator.take_for(&url.client_ref, kind) {
             Some(p) => p,
             None => {
                 tracing::warn!(request_ref = %url.request_ref, "signed upload url with no pending upload");
@@ -300,6 +352,16 @@ impl hq_agent::ServerFrameHooks for UploadExecutor {
             }
         };
         tracing::info!(request_ref = %url.request_ref, size = pending.size_bytes, "uploading pending blob");
+        // T-P22: digest of exactly the bytes being uploaded, for the report.
+        let digest_path = pending.path.clone();
+        let (size, sha256) = tokio::task::spawn_blocking(move || {
+            use sha2::Digest;
+            std::fs::read(&digest_path)
+                .map(|b| (b.len() as i64, format!("{:x}", sha2::Sha256::digest(&b))))
+                .unwrap_or((0, String::new()))
+        })
+        .await
+        .unwrap_or((0, String::new()));
         let path = pending.path.clone();
         let upload_url = url.upload_url.clone();
         let audit = self.audit.clone();
@@ -321,6 +383,25 @@ impl hq_agent::ServerFrameHooks for UploadExecutor {
         })
         .await;
         let ok = matches!(&result, Ok(Ok(_)));
+        let error = match &result {
+            Ok(Ok(_)) => String::new(),
+            Ok(Err(e)) => e.to_string(),
+            Err(e) => e.to_string(),
+        };
+        // T-P22: report the outcome so HQ finalises (or fails) the row
+        // instead of trusting its optimistic record.
+        let reported = self.mailbox.try_publish(pb::AgentFrame {
+            body: Some(pb::agent_frame::Body::UploadComplete(pb::UploadComplete {
+                request_ref: request_ref.clone(),
+                success: ok,
+                size_bytes: if ok { size } else { 0 },
+                sha256: if ok { sha256 } else { String::new() },
+                error,
+            })),
+        });
+        if !reported {
+            tracing::warn!(request_ref = %request_ref, "upload_complete dropped (agent offline or saturated)");
+        }
         let _ = audit.append(&AuditEntry {
             ts: time::OffsetDateTime::now_utc()
                 .format(&time::format_description::well_known::Rfc3339)
@@ -578,21 +659,17 @@ impl DeviceOps {
         if let Err(e) = std::fs::write(&path, &body) {
             return CommandOutcome::failure("INTERNAL", format!("backup write: {e}"));
         }
-        self.coordinator.register(PendingUpload {
+        let client_ref = self.coordinator.register(PendingUpload {
             kind: pb::log_upload_request::Kind::Backup,
             path: path.clone(),
             size_bytes: body.len() as u64,
+            client_ref: String::new(),
         });
-        let sent = mailbox.try_publish(pb::AgentFrame {
-            body: Some(pb::agent_frame::Body::LogUploadRequest(
-                pb::LogUploadRequest {
-                    kind: pb::log_upload_request::Kind::Backup.into(),
-                    time_range_start_unix_ms: 0,
-                    time_range_end_unix_ms: 0,
-                    size_bytes_estimate: body.len() as i64,
-                },
-            )),
-        });
+        let sent = mailbox.try_publish(upload_request_frame(
+            pb::log_upload_request::Kind::Backup,
+            body.len() as u64,
+            &client_ref,
+        ));
         CommandOutcome::ok_json(
             "OK",
             serde_json::json!({
@@ -927,17 +1004,12 @@ impl DeviceOps {
             Err(e) => return CommandOutcome::failure("INTERNAL", e),
         };
         let size = upload.size_bytes;
-        self.coordinator.register(upload);
-        let sent = mailbox.try_publish(pb::AgentFrame {
-            body: Some(pb::agent_frame::Body::LogUploadRequest(
-                pb::LogUploadRequest {
-                    kind: pb::log_upload_request::Kind::LogBundle.into(),
-                    time_range_start_unix_ms: 0,
-                    time_range_end_unix_ms: 0,
-                    size_bytes_estimate: size as i64,
-                },
-            )),
-        });
+        let client_ref = self.coordinator.register(upload);
+        let sent = mailbox.try_publish(upload_request_frame(
+            pb::log_upload_request::Kind::LogBundle,
+            size,
+            &client_ref,
+        ));
         CommandOutcome::ok_json(
             "OK",
             serde_json::json!({
@@ -1037,6 +1109,7 @@ impl DeviceOps {
             kind: pb::log_upload_request::Kind::LogBundle,
             path,
             size_bytes: bytes.len() as u64,
+            client_ref: String::new(),
         })
     }
 }
@@ -1191,18 +1264,9 @@ async fn forward_bundle(ops: &DeviceOps, mailbox: &AgentMailbox, payload: &str) 
             return;
         }
     };
-    let size = upload.size_bytes as i64;
-    ops.coordinator.register(upload);
-    let frame = pb::AgentFrame {
-        body: Some(pb::agent_frame::Body::LogUploadRequest(
-            pb::LogUploadRequest {
-                kind: pb::log_upload_request::Kind::LogBundle.into(),
-                time_range_start_unix_ms: 0,
-                time_range_end_unix_ms: 0,
-                size_bytes_estimate: size,
-            },
-        )),
-    };
+    let size = upload.size_bytes;
+    let client_ref = ops.coordinator.register(upload);
+    let frame = upload_request_frame(pb::log_upload_request::Kind::LogBundle, size, &client_ref);
     if !mailbox.try_publish(frame) {
         tracing::debug!("log upload request dropped (agent offline or saturated)");
     }
@@ -1277,5 +1341,50 @@ pub async fn run_data_bridge(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod upload_coordinator_tests {
+    use super::*;
+
+    fn upload(kind: pb::log_upload_request::Kind, name: &str) -> PendingUpload {
+        PendingUpload {
+            kind,
+            path: PathBuf::from(name),
+            size_bytes: 1,
+            client_ref: String::new(),
+        }
+    }
+
+    /// T-P22: an echoed client_ref selects exactly its blob, even when
+    /// uploads of both kinds interleave (positional matching could PUT a
+    /// backup into a log-bundle object).
+    #[test]
+    fn client_ref_selects_the_matching_upload() {
+        let c = UploadCoordinator::new();
+        let bundle = c.register(upload(pb::log_upload_request::Kind::LogBundle, "bundle"));
+        let backup = c.register(upload(pb::log_upload_request::Kind::Backup, "backup"));
+        assert_ne!(bundle, backup);
+        let got = c
+            .take_for(&backup, pb::log_upload_request::Kind::LogBundle)
+            .unwrap();
+        assert_eq!(got.path, PathBuf::from("backup"));
+        assert!(c
+            .take_for(&backup, pb::log_upload_request::Kind::Backup)
+            .is_none());
+        assert_eq!(c.pending_count(), 1);
+    }
+
+    /// Pre-T-P22 gateway (no echo): positional by kind, as before.
+    #[test]
+    fn empty_client_ref_falls_back_to_kind() {
+        let c = UploadCoordinator::new();
+        c.register(upload(pb::log_upload_request::Kind::LogBundle, "bundle"));
+        c.register(upload(pb::log_upload_request::Kind::Backup, "backup"));
+        let got = c
+            .take_for("", pb::log_upload_request::Kind::Backup)
+            .unwrap();
+        assert_eq!(got.path, PathBuf::from("backup"));
     }
 }
