@@ -30,8 +30,18 @@ jobs:
         run: make check
       - name: Release checksum gate (task 28)
         run: make lint-checksums
+      # CFG-034: the wiring gate used to be skipped in CI (`|| echo skipped`)
+      # because meta-acadia was never checked out. It is a separate private
+      # repository; META_ACADIA_READ_TOKEN is a read-only token for it.
+      - name: Check out meta-acadia (image recipe)
+        uses: actions/checkout@v4
+        with:
+          repository: soccentric-acadia/meta-acadia
+          ref: develop
+          path: .ci/meta-acadia
+          token: ${{ secrets.META_ACADIA_READ_TOKEN }}
       - name: OS image wiring gate (task 26/27)
-        run: make lint-image-wiring || echo "Acadia-OS not present in this checkout — wiring gate skipped"
+        run: make lint-image-wiring META_ACADIA_DIR=.ci/meta-acadia
       - name: Lint
         run: make lint
       - name: Test (fake sysroot, no hardware)
@@ -66,7 +76,7 @@ jobs:
       - name: Binary size budget (3–6 MB)
         run: |
           BIN="target/${{ matrix.target }}/release/webconfigd"
-          KB=$$(stat -c %s "$$BIN")
-          echo "webconfigd size: $$((KB/1024)) KB"
+          BYTES=$(stat -c %s "$BIN")
+          echo "webconfigd size: $((BYTES/1024)) KB"
           # Spec §2 target is 3–6 MB; warn (not fail) at first while we tune opt flags.
-          if [ "$$((KB/1024))" -gt 6144 ]; then echo "::warning::binary exceeds 6 MB budget"; fi
+          if [ "$((BYTES/1024))" -gt 6144 ]; then echo "::warning::binary exceeds 6 MB budget"; fi

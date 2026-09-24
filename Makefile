@@ -67,10 +67,16 @@ test-image: ## Image-level boot integration tests (webconfigd under systemd; req
 		echo "bats not installed — image-level tests skipped (target-required)"; \
 	fi
 
+# CFG-034: the layer location is overridable so CI can check meta-acadia out
+# next to this repo (it is its own repository, not part of Acadia-OS's tree).
+META_ACADIA_DIR ?= ../Acadia-OS/meta/meta-acadia
+
 lint-image-wiring: ## Static check that the OS image installs webconfig packages (task 26/27)
+	@test -f $(META_ACADIA_DIR)/recipes-core/images/acadia-image.bb || \
+		{ echo "ERROR: $(META_ACADIA_DIR)/recipes-core/images/acadia-image.bb not found (set META_ACADIA_DIR)"; exit 1; }
 	@fail=0; \
 	for p in webconfigd webconfig-static webconfig-schemas webconfig-manifest; do \
-		if grep -q "IMAGE_INSTALL:append.*$$p" ../Acadia-OS/meta/meta-acadia/recipes-core/images/acadia-image.bb 2>/dev/null; then \
+		if grep -q "IMAGE_INSTALL:append.*$$p" $(META_ACADIA_DIR)/recipes-core/images/acadia-image.bb 2>/dev/null; then \
 			echo "  OK: $$p referenced in acadia-image.bb"; \
 		else \
 			echo "  FAIL: $$p not referenced in Acadia-OS acadia-image.bb"; fail=1; \
