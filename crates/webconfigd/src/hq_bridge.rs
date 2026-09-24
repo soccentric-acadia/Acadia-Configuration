@@ -355,9 +355,8 @@ impl hq_agent::ServerFrameHooks for UploadExecutor {
         // T-P22: digest of exactly the bytes being uploaded, for the report.
         let digest_path = pending.path.clone();
         let (size, sha256) = tokio::task::spawn_blocking(move || {
-            use sha2::Digest;
-            std::fs::read(&digest_path)
-                .map(|b| (b.len() as i64, format!("{:x}", sha2::Sha256::digest(&b))))
+            webconfig_engine::applier::sha256_file(&digest_path)
+                .map(|(n, d)| (n as i64, d))
                 .unwrap_or((0, String::new()))
         })
         .await
@@ -367,7 +366,7 @@ impl hq_agent::ServerFrameHooks for UploadExecutor {
         let audit = self.audit.clone();
         let request_ref = url.request_ref.clone();
         let result = tokio::task::spawn_blocking(move || {
-            webconfig_engine::applier::run_cmd(
+            webconfig_engine::applier::run_local(
                 "curl",
                 &[
                     "--fail",
@@ -696,7 +695,7 @@ impl DeviceOps {
         let target = path.clone();
         let url = url.to_string();
         let download = tokio::task::spawn_blocking(move || {
-            webconfig_engine::applier::run_cmd(
+            webconfig_engine::applier::run_local(
                 "curl",
                 &[
                     "--fail",
@@ -770,7 +769,8 @@ impl DeviceOps {
                 "checksum_sha256 must be a SHA-256 hex digest",
             );
         }
-        let dir = self.sysroot.webconfig_dir().join("hq-uploads");
+        // Staged outside /pst (1 GiB, shared): see Sysroot::ota_staging_dir.
+        let dir = self.sysroot.ota_staging_dir().join("hq-uploads");
         if let Err(e) = std::fs::create_dir_all(&dir) {
             return CommandOutcome::failure("INTERNAL", format!("download dir: {e}"));
         }
@@ -778,7 +778,7 @@ impl DeviceOps {
         let target = path.clone();
         let url = url.to_string();
         let download = tokio::task::spawn_blocking(move || {
-            webconfig_engine::applier::run_cmd(
+            webconfig_engine::applier::run_local(
                 "curl",
                 &[
                     "--fail",
@@ -797,12 +797,20 @@ impl DeviceOps {
             let _ = std::fs::remove_file(&path);
             return CommandOutcome::failure("INTERNAL", format!("artifact download: {e}"));
         }
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(e) => return CommandOutcome::failure("INTERNAL", format!("artifact read: {e}")),
+        // Streaming digest: the daemon is capped at 32 MiB and a bundle is
+        // hundreds of MB (reading it whole OOM-killed webconfigd).
+        let hash_path = path.clone();
+        let digest = match tokio::task::spawn_blocking(move || {
+            webconfig_engine::applier::sha256_file(&hash_path)
+        })
+        .await
+        {
+            Ok(Ok((_, d))) => d,
+            Ok(Err(e)) => {
+                return CommandOutcome::failure("INTERNAL", format!("artifact read: {e}"))
+            }
+            Err(e) => return CommandOutcome::failure("INTERNAL", e.to_string()),
         };
-        use sha2::Digest;
-        let digest = format!("{:x}", sha2::Sha256::digest(&bytes));
         if digest != expected.to_ascii_lowercase() {
             let _ = std::fs::remove_file(&path);
             return CommandOutcome::failure("FAILED_PRECONDITION", "artifact checksum mismatch");

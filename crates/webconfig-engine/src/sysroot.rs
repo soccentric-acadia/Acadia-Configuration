@@ -86,6 +86,18 @@ impl Sysroot {
         self.data_dir().join("webconfig")
     }
 
+    /// Where update bundles are staged before install. `/pst` (1 GiB, shared
+    /// with istate) is too small for full-image `.swu` bundles, so a device
+    /// points `WEBCONFIG_OTA_STAGING_DIR` at `/var/lib/webconfig-ota` on the
+    /// rootfs (meta-webconfig tmpfiles + unit ReadWritePaths). Default: the
+    /// webconfig data dir, as before.
+    pub fn ota_staging_dir(&self) -> PathBuf {
+        match std::env::var("WEBCONFIG_OTA_STAGING_DIR") {
+            Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
+            _ => self.webconfig_dir(),
+        }
+    }
+
     /// `/usr/share/webconfig` — BSP-provided, read-only manifests & schemas.
     pub fn share_dir(&self) -> PathBuf {
         self.join("/usr/share/webconfig")

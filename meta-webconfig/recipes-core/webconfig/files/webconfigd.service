@@ -33,6 +33,8 @@ ExecStart=/usr/bin/webconfigd
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=-/pst/webconfig
+# Update-bundle staging on the rootfs (/pst is too small for .swu bundles).
+ReadWritePaths=-/var/lib/webconfig-ota
 # No new privileges; no executing setuid binaries.
 NoNewPrivileges=true
 # Drop all capabilities except the ones genuinely needed (none for v1: the

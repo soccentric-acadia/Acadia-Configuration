@@ -311,7 +311,13 @@ pub const SWUPDATE_PUBKEY: &str = "/etc/swupdate/swupdate-public.pem";
 /// Directories an update bundle may be installed from: webconfigd's own data
 /// dir (upload staging, HQ downloads) — `/pst/webconfig` on A/B boards
 /// (T-P01), the legacy/non-A/B locations otherwise.
-pub const BUNDLE_DIRS: &[&str] = &["/pst/webconfig/", "/var/lib/webconfig/", "/data/webconfig/"];
+pub const BUNDLE_DIRS: &[&str] = &[
+    "/pst/webconfig/",
+    "/var/lib/webconfig/",
+    "/data/webconfig/",
+    // Rootfs staging for full-image bundles (WEBCONFIG_OTA_STAGING_DIR).
+    "/var/lib/webconfig-ota/",
+];
 
 /// Whether a bundle path is a plain file path inside [`BUNDLE_DIRS`].
 pub fn bundle_path_allowed(path: &str) -> bool {
@@ -567,6 +573,10 @@ mod tests {
             &s(&["/pst/webconfig/uploads/x.swu"])
         ));
         assert!(!exec_allowed("swupdate-client", &s(&["/tmp/x.swu"])));
+        assert!(exec_allowed(
+            "swupdate-client",
+            &s(&["/var/lib/webconfig-ota/hq-uploads/hq-artifact.bundle"])
+        ));
         assert!(!exec_allowed(
             "swupdate-client",
             &s(&["/pst/webconfig/../../etc/shadow"])

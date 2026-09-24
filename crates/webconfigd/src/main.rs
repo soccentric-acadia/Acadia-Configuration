@@ -23,6 +23,7 @@ mod server;
 mod sse;
 mod state;
 mod systemd;
+mod telemetry_publisher;
 mod tls;
 mod update_backend;
 
@@ -52,6 +53,11 @@ async fn main() -> anyhow::Result<()> {
 
     let static_dir = resolve_static_dir();
     let telemetry = state.telemetry.clone();
+    // T-P27: telemetry publisher + durable queue drain.
+    tokio::spawn(telemetry_publisher::run(
+        engine.clone(),
+        state.telemetry.clone(),
+    ));
     let pairing = state.pairing.clone();
     let app = routes::build_router(state.clone(), static_dir);
 

@@ -86,6 +86,61 @@ pub trait Applier: Send + Sync {
 /// commands that honor a root (`--root=`) pass it themselves; tests use the
 /// file-writing appliers instead. Kept as a shared helper to keep error shape
 /// uniform.
+/// Run a program as this (unprivileged) process, never through the root
+/// helper: network clients (`curl`, `mosquitto_pub`) that only read/write the
+/// daemon's own files. Routing them through `run_cmd` sent them to the helper
+/// on a flashed device, whose allowlist rightly refuses them — so HQ update
+/// downloads, backup/log uploads and alert delivery failed on target.
+pub fn run_local(cmd: &str, args: &[&str]) -> Result<String, ApplyError> {
+    run_local_env(cmd, args, &[])
+}
+
+/// [`run_local`] with extra environment (e.g. `XDG_CONFIG_HOME` pointing
+/// mosquitto_pub at a 0600 options file, so credentials stay off argv).
+pub fn run_local_env(
+    cmd: &str,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Result<String, ApplyError> {
+    let out = std::process::Command::new(cmd)
+        .args(args)
+        .envs(envs.iter().copied())
+        .output()
+        .map_err(|e| ApplyError::Command {
+            cmd: cmd.to_string(),
+            code: None,
+            stderr: e.to_string(),
+        })?;
+    if !out.status.success() {
+        return Err(ApplyError::Command {
+            cmd: cmd.to_string(),
+            code: out.status.code(),
+            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Streaming SHA-256 of a file → (size, lowercase hex). Bounded memory: the
+/// daemon runs with MemoryMax=32M, and update bundles are hundreds of MB.
+pub fn sha256_file(path: &std::path::Path) -> std::io::Result<(u64, String)> {
+    use sha2::Digest;
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut size = 0u64;
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        size += n as u64;
+        hasher.update(&buf[..n]);
+    }
+    Ok((size, hex::encode(hasher.finalize())))
+}
+
 pub fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, ApplyError> {
     // T-P02: on a flashed device (non-root + helper socket) every live verb
     // routes through the root helper's fixed allowlist; the direct path stays

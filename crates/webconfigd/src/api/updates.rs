@@ -113,7 +113,7 @@ pub async fn upload(
     role.require_admin("updates.upload")?;
     let user = username(&session).await;
 
-    let uploads_dir = app.engine.sysroot.webconfig_dir().join("uploads");
+    let uploads_dir = app.engine.sysroot.ota_staging_dir().join("uploads");
     std::fs::create_dir_all(&uploads_dir)?;
     let stem = match q.name {
         Some(name) => {
@@ -208,7 +208,7 @@ pub async fn acquire(
         ));
     }
 
-    let uploads_dir = app.engine.sysroot.webconfig_dir().join("uploads");
+    let uploads_dir = app.engine.sysroot.ota_staging_dir().join("uploads");
     std::fs::create_dir_all(&uploads_dir)?;
     let stem = match req.name {
         Some(name) => {
@@ -259,7 +259,7 @@ pub async fn acquire(
     args.push(req.url.clone());
 
     let url_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let dl = webconfig_engine::applier::run_cmd("curl", &url_args);
+    let dl = webconfig_engine::applier::run_local("curl", &url_args);
     if let Err(e) = dl {
         // Do not leave a partial bundle behind on a failed download.
         let _ = std::fs::remove_file(&bundle_path);
@@ -371,7 +371,7 @@ pub async fn ota_check(
         })));
     }
 
-    let output = webconfig_engine::applier::run_cmd(
+    let output = webconfig_engine::applier::run_local(
         "curl",
         &[
             "--fail",
@@ -458,7 +458,7 @@ pub async fn backup_check(
         })));
     }
 
-    let output = webconfig_engine::applier::run_cmd(
+    let output = webconfig_engine::applier::run_local(
         "curl",
         &[
             "--fail",
@@ -620,7 +620,7 @@ pub async fn backup_upload(
     args.push(body);
     args.push(url.clone());
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    webconfig_engine::applier::run_cmd("curl", &refs)
+    webconfig_engine::applier::run_local("curl", &refs)
         .map_err(|e| ApiError::BadRequest(format!("remote backup upload failed: {e}")))?;
     audit(
         &app,

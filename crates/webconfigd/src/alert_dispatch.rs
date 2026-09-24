@@ -17,7 +17,7 @@
 use std::io::Write;
 
 use webconfig_engine::alert::AlertEvent;
-use webconfig_engine::applier::run_cmd;
+use webconfig_engine::applier::run_local;
 use webconfig_engine::store::alerts::{AlertRule, AlertsConfig};
 use webconfig_engine::store::services::MqttConfig;
 use webconfig_engine::telemetry::TelemetryQueue;
@@ -98,7 +98,7 @@ pub fn dispatch_webhook(sysroot: &Sysroot, webhooks: &[String], payload: &str, e
     for url in webhooks {
         let args = webhook_args(url, &file);
         let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        if let Err(e) = run_cmd("curl", &refs) {
+        if let Err(e) = run_local("curl", &refs) {
             tracing::warn!(url = %url, error = %e, "alert webhook POST failed");
         }
     }
@@ -108,42 +108,6 @@ pub fn dispatch_webhook(sysroot: &Sysroot, webhooks: &[String], payload: &str, e
 pub fn mqtt_topic(base: &str, rule_id: &str) -> String {
     let base = base.trim_end_matches('/');
     format!("{base}/{rule_id}")
-}
-
-/// `mosquitto_pub` argument list for publishing the staged payload to `topic`,
-/// derived from the MQTT broker config (host/port/credentials/TLS).
-pub fn mqtt_args(
-    cfg: &MqttConfig,
-    topic: &str,
-    payload_file: &std::path::Path,
-) -> Option<Vec<String>> {
-    let host = cfg.host.as_deref().unwrap_or("");
-    if host.is_empty() {
-        return None;
-    }
-    let mut args: Vec<String> = vec![
-        "-h".into(),
-        host.into(),
-        "-p".into(),
-        cfg.port.unwrap_or(1883).to_string(),
-        "-t".into(),
-        topic.into(),
-        "-f".into(),
-        format!("@{}", payload_file.display()),
-    ];
-    if cfg.tls {
-        args.push("--cafile".into());
-        args.push("/etc/ssl/certs/ca-certificates.crt".into());
-    }
-    if let Some(u) = &cfg.username {
-        args.push("-u".into());
-        args.push(u.clone());
-    }
-    if let Some(p) = &cfg.password {
-        args.push("-P".into());
-        args.push(p.clone());
-    }
-    Some(args)
 }
 
 /// Publish the event to the configured MQTT event topic (spec §4.7). Real root
@@ -165,15 +129,11 @@ pub fn dispatch_mqtt(
     if base.is_empty() || !mqtt_cfg.enabled {
         return;
     }
-    let Ok(file) = stage_payload(sysroot, event, payload) else {
-        return;
-    };
     let topic = mqtt_topic(base, &event.rule_id);
-    let Some(args) = mqtt_args(mqtt_cfg, &topic, &file) else {
-        return;
-    };
-    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    if let Err(e) = run_cmd("mosquitto_pub", &refs) {
+    // T-P27: credentials via a 0600 options file, never argv.
+    if let Err(e) =
+        crate::telemetry_publisher::publish_alert_mqtt(sysroot, mqtt_cfg, &topic, payload)
+    {
         tracing::warn!(topic = %topic, error = %e, "alert MQTT publish failed; queuing for retry");
         // Task 37: durable offline queue. On broker failure, enqueue the event
         // so it is retried later (survives outage/restart) instead of being
@@ -279,30 +239,16 @@ mod tests {
         );
     }
 
+    /// T-P27: alert MQTT publishing needs a broker host; credentials go
+    /// through a 0600 options file (see telemetry_publisher), never argv.
     #[test]
-    fn mqtt_args_require_host_and_apply_credentials() {
-        let mut cfg = MqttConfig::default();
-        assert!(mqtt_args(&cfg, "t", std::path::Path::new("/p")).is_none());
-        cfg.host = Some("broker.local".into());
-        cfg.port = Some(8883);
-        cfg.tls = true;
-        cfg.username = Some("user".into());
-        cfg.password = Some("pass".into());
-        let args = mqtt_args(
-            &cfg,
-            "soccentric/events/disk-full",
-            std::path::Path::new("/p.json"),
-        )
-        .unwrap();
-        assert!(args.contains(&"-h".into()));
-        assert!(args.contains(&"broker.local".into()));
-        assert!(args.contains(&"8883".into()));
-        assert!(args.contains(&"--cafile".into()));
-        assert!(args.contains(&"-u".into()));
-        assert!(args.contains(&"user".into()));
-        assert!(args.contains(&"-P".into()));
-        assert!(args.contains(&"pass".into()));
-        assert!(args.contains(&"@/p.json".into()));
+    fn alert_mqtt_requires_a_broker_host() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sys = Sysroot::at(tmp.path());
+        let err =
+            crate::telemetry_publisher::publish_alert_mqtt(&sys, &MqttConfig::default(), "t", "{}")
+                .unwrap_err();
+        assert!(err.contains("host"), "{err}");
     }
 
     #[test]
