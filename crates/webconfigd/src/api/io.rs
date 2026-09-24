@@ -530,12 +530,29 @@ pub async fn put(
         }
     }
     let user = username(&session).await;
+    let before = app.engine.load()?.io;
     let cfg = app.engine.update(move |c| {
         c.io = req.clone();
         Ok(())
     })?;
     audit(&app, &user, "io.put", None);
+    // T-P28 (M04/M08): LED policy and camera capture take effect on save —
+    // only when their part of the io section actually changed.
+    if changed(&before.board_leds, &cfg.io.board_leds) {
+        app.engine.validate("board_leds").await?;
+        let _ = apply_and_audit(&app, &user, "board_leds").await?;
+    }
+    if changed(&before.cameras, &cfg.io.cameras) || before.cameras_enabled != cfg.io.cameras_enabled
+    {
+        app.engine.validate("camera").await?;
+        let _ = apply_and_audit(&app, &user, "camera").await?;
+    }
     Ok(Json(cfg.io))
+}
+
+/// Change detection for store structs that do not derive PartialEq.
+fn changed<T: serde::Serialize>(a: &T, b: &T) -> bool {
+    serde_json::to_value(a).ok() != serde_json::to_value(b).ok()
 }
 
 /// `POST /api/v1/io/can/apply` — apply the CAN applier (spec §4.9).

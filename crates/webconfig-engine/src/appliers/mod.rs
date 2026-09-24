@@ -7,6 +7,8 @@
 //! with a real implementation **and** a mock — never a silent TODO (spec §7).
 
 pub mod ap;
+pub mod board_leds;
+pub mod camera;
 pub mod can;
 pub mod firewall;
 pub mod gpio;
@@ -20,6 +22,8 @@ pub mod wifi;
 pub mod wireguard;
 
 pub use ap::ApApplier;
+pub use board_leds::BoardLedApplier;
+pub use camera::CameraApplier;
 pub use can::CanApplier;
 pub use firewall::FirewallApplier;
 pub use gpio::GpioApplier;
@@ -59,5 +63,8 @@ pub fn all(manifest_peripherals: &[Peripheral], wifi_radio: &WifiRadio) -> Vec<B
         Box::new(GpioApplier::new(manifest_peripherals)),
         Box::new(JournaldApplier::new()),
         Box::new(WireGuardApplier::new()),
+        // T-P28 (M04/M08)
+        Box::new(BoardLedApplier::new()),
+        Box::new(CameraApplier::new()),
     ]
 }

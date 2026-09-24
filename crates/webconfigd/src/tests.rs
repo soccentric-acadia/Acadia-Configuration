@@ -2814,12 +2814,20 @@ async fn system_apply_all_covers_every_registered_applier() {
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     let results = v["results"].as_array().unwrap();
     // The applier set: hostname time ssh networkd firewall wifi ap can serial
-    // gpio journald wireguard.
+    // gpio journald wireguard board_leds camera (T-P28).
     assert_eq!(
         results.len(),
-        12,
-        "expected all 12 appliers, got {}",
+        14,
+        "expected all 14 appliers, got {}",
         results.len()
+    );
+    let ids: Vec<&str> = results
+        .iter()
+        .filter_map(|r| r["applier"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"board_leds") && ids.contains(&"camera"),
+        "{ids:?}"
     );
     // Every result names its applier and an ok flag.
     for r in results {

@@ -66,6 +66,8 @@ pub const SYSTEMCTL_FIXED_UNITS: &[&str] = &[
     "webconfigd.service",
     "swupdate.service",
     "swupdate.socket",
+    // appliers/camera.rs (T-P28, M08)
+    "acadia-camera-capture.service",
 ];
 
 /// Unit-name prefixes that expand dynamically per interface/device (appliers/
@@ -139,7 +141,44 @@ pub const WRITE_PREFIXES: &[&str] = &[
 ];
 
 /// Exact files the appliers write outside the prefix trees.
-pub const WRITE_FILES: &[&str] = &["/etc/hostname"];
+pub const WRITE_FILES: &[&str] = &[
+    "/etc/hostname",
+    // appliers/camera.rs (T-P28): ENABLED / CAMERA_DEVICE of the capture service
+    "/etc/acadia/camera-capture.conf",
+];
+
+/// LED attributes the board-LED policy writes (T-P28, engine leds.rs).
+const LED_ATTRIBUTES: &[&str] = &["trigger", "brightness", "delay_on", "delay_off"];
+
+fn led_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.contains("..")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.'))
+}
+
+/// `/sys/class/leds/<name>/<attr>` writes, plus the directory the class
+/// symlink resolves to (`/sys/devices/**/leds/<name>`) — the write handler
+/// re-checks the canonical parent against this allowlist.
+fn led_path_allowed(p: &str) -> bool {
+    if let Some(rest) = p.strip_prefix("/sys/class/leds/") {
+        let mut parts = rest.split('/');
+        return match (parts.next(), parts.next(), parts.next()) {
+            (Some(name), Some(attr), None) => led_name_ok(name) && LED_ATTRIBUTES.contains(&attr),
+            (Some(name), None, None) => led_name_ok(name),
+            _ => false,
+        };
+    }
+    if let Some(rest) = p.strip_prefix("/sys/devices/") {
+        let parts: Vec<&str> = rest.split('/').collect();
+        return parts.len() >= 2
+            && parts[parts.len() - 2] == "leds"
+            && led_name_ok(parts[parts.len() - 1]);
+    }
+    false
+}
 
 /// Accounts `chpasswd` may be pointed at (B04: root password from the UI).
 pub const PASSWORD_USERS: &[&str] = &["root", "rpi"];
@@ -398,6 +437,9 @@ pub fn path_allowed(path: &std::path::Path) -> bool {
     if WRITE_FILES.contains(&p.as_ref()) {
         return true;
     }
+    if led_path_allowed(&p) {
+        return true;
+    }
     WRITE_PREFIXES.iter().any(|prefix| {
         if !p.starts_with(prefix) || p[prefix.len()..].contains("..") {
             return false;
@@ -639,6 +681,31 @@ mod tests {
         assert!(!boot_slot_allowed("a"));
         assert!(!boot_slot_allowed("../A"));
         assert!(!boot_slot_allowed(""));
+    }
+
+    #[test]
+    fn led_and_camera_paths() {
+        for p in [
+            "/sys/class/leds/ACT/trigger",
+            "/sys/class/leds/rpi:green:status/delay_on",
+            "/sys/devices/platform/leds/leds/ACT",
+            "/etc/acadia/camera-capture.conf",
+        ] {
+            assert!(path_allowed(std::path::Path::new(p)), "must allow {p}");
+        }
+        for p in [
+            "/sys/class/leds/ACT/uevent",
+            "/sys/class/leds/../power/state",
+            "/sys/devices/platform/leds/leds/ACT/trigger",
+            "/sys/devices/system/cpu/cpu0",
+            "/etc/acadia/client.conf",
+        ] {
+            assert!(!path_allowed(std::path::Path::new(p)), "must reject {p}");
+        }
+        assert!(exec_allowed(
+            "systemctl",
+            &s(&["enable", "--now", "acadia-camera-capture.service"])
+        ));
     }
 
     #[test]

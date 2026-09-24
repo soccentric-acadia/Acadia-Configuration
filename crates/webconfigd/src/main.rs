@@ -18,6 +18,7 @@ mod hq_bridge;
 mod hq_command_handler;
 mod istate_client;
 mod jobs;
+mod led_policy;
 mod routes;
 mod server;
 mod sse;
@@ -113,6 +114,16 @@ async fn main() -> anyhow::Result<()> {
         },
         pub_rx,
         agent_stop_rx,
+    ));
+    // T-P28: status-LED policy and log-level relay to logmanager.
+    tokio::spawn(led_policy::run_led_policy(
+        engine.clone(),
+        state.systemd.clone(),
+        state.manifest.service_allowlist.clone(),
+    ));
+    tokio::spawn(led_policy::run_log_level_relay(
+        engine.clone(),
+        state.istate.clone(),
     ));
     // T-P24: periodic device snapshot carried by every heartbeat.
     tokio::spawn(hq_bridge::run_status_snapshot(ops.clone()));

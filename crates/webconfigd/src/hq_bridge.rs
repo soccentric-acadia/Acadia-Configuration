@@ -179,7 +179,7 @@ fn section_appliers(section: &str) -> &'static [&'static str] {
         "network" => &["networkd", "wifi", "ap", "firewall", "wireguard"],
         "security" => &["firewall", "wireguard"],
         "logs" => &["journald"],
-        "io" => &["gpio", "serial", "can"],
+        "io" => &["gpio", "serial", "can", "board_leds", "camera"],
         _ => &[],
     }
 }

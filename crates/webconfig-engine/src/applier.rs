@@ -79,13 +79,6 @@ pub trait Applier: Send + Sync {
     }
 }
 
-/// Helper: run an external command, capturing stderr, mapping non-zero exit to
-/// [`ApplyError::Command`]. Commands are only used by appliers that shell out
-/// to well-known OS verbs (hostnamectl, timedatectl, ip, nft, wg, journalctl,
-/// chpasswd). The sysroot parameter is *not* applied to the command here —
-/// commands that honor a root (`--root=`) pass it themselves; tests use the
-/// file-writing appliers instead. Kept as a shared helper to keep error shape
-/// uniform.
 /// Run a program as this (unprivileged) process, never through the root
 /// helper: network clients (`curl`, `mosquitto_pub`) that only read/write the
 /// daemon's own files. Routing them through `run_cmd` sent them to the helper
@@ -141,6 +134,13 @@ pub fn sha256_file(path: &std::path::Path) -> std::io::Result<(u64, String)> {
     Ok((size, hex::encode(hasher.finalize())))
 }
 
+/// Helper: run an external command, capturing stderr, mapping non-zero exit to
+/// [`ApplyError::Command`]. Commands are only used by appliers that shell out
+/// to well-known OS verbs (hostnamectl, timedatectl, ip, nft, wg, journalctl,
+/// chpasswd). The sysroot parameter is *not* applied to the command here —
+/// commands that honor a root (`--root=`) pass it themselves; tests use the
+/// file-writing appliers instead. Kept as a shared helper to keep error shape
+/// uniform.
 pub fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, ApplyError> {
     // T-P02: on a flashed device (non-root + helper socket) every live verb
     // routes through the root helper's fixed allowlist; the direct path stays
