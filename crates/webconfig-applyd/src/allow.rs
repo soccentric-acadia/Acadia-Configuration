@@ -62,7 +62,8 @@ pub const SYSTEMCTL_FIXED_UNITS: &[&str] = &[
     "gpsd.service",
     "chrony.service",
     "chronyd.service",
-    "webconfig-syslog-forward.service",
+    "webconfig-syslog-forward.service", // pre-T-P29 unit, disabled on apply
+    "rsyslog.service",                  // journald.rs remote syslog (T-P29)
     "webconfigd.service",
     "swupdate.service",
     "swupdate.socket",
@@ -135,6 +136,9 @@ pub const WRITE_PREFIXES: &[&str] = &[
     "/etc/wireguard/",
     // sshd_config.d drop-ins (ssh.rs)
     "/etc/ssh/sshd_config.d/",
+    // remote syslog forwarding rule (journald.rs, T-P29) — name-filtered in
+    // path_allowed to WebConfig's own snippet
+    "/etc/rsyslog.d/",
     // operator account authorized_keys (ssh.rs, T-P11/B05: keys live for the
     // operator user, never root — PermitRootLogin is no in the image)
     "/home/operator/.ssh/",
@@ -446,6 +450,10 @@ pub fn path_allowed(path: &std::path::Path) -> bool {
         }
         // The generated-unit tree is name-filtered: only the appliers' own
         // unit names (can-*, webconfig-*) may ever be created there.
+        if *prefix == "/etc/rsyslog.d/" {
+            let name = &p[prefix.len()..];
+            return name.starts_with("50-webconfig-") && !name.contains('/');
+        }
         if *prefix == "/etc/systemd/system/" {
             let name = p[prefix.len()..]
                 .trim_start_matches('/')
@@ -690,6 +698,7 @@ mod tests {
             "/sys/class/leds/rpi:green:status/delay_on",
             "/sys/devices/platform/leds/leds/ACT",
             "/etc/acadia/camera-capture.conf",
+            "/etc/rsyslog.d/50-webconfig-forward.conf",
         ] {
             assert!(path_allowed(std::path::Path::new(p)), "must allow {p}");
         }
@@ -699,6 +708,8 @@ mod tests {
             "/sys/devices/platform/leds/leds/ACT/trigger",
             "/sys/devices/system/cpu/cpu0",
             "/etc/acadia/client.conf",
+            "/etc/rsyslog.d/00-base.conf",
+            "/etc/rsyslog.conf",
         ] {
             assert!(!path_allowed(std::path::Path::new(p)), "must reject {p}");
         }
