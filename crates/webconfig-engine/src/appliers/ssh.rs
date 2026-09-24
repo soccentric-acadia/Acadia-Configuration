@@ -5,8 +5,9 @@
 //!     `<sysroot>/home/operator/.ssh/authorized_keys` (0600, dir 0700,
 //!     owner operator:operator — T-P11/B05: keys never live under /root),
 //!     with a single-level file backup for rollback.
-//!   - `sshd_enabled` → `systemctl enable/start` or `disable/stop` of
-//!     `sshd.service` on the real root.
+//!   - `sshd_enabled` → `systemctl enable/start` or `disable/stop` of the
+//!     image's sshd unit on the real root: `sshd.socket` where OpenSSH is
+//!     socket-activated (the Acadia image), else `sshd.service`.
 //!   - `serial_getty_enabled` → enable/disable the console serial-getty unit
 //!     (`serial-getty@ttyS0.service`, the conventional SoC debug console; a
 //!     platform manifest may refine the tty in a later revision).
@@ -23,7 +24,27 @@ use crate::applier::{run_cmd, Applier, ApplyError, ApplyOutcome, FileBackup};
 use crate::store::Config;
 use crate::sysroot::Sysroot;
 
-const SSHD_UNIT: &str = "sshd.service";
+const SSHD_SERVICE: &str = "sshd.service";
+const SSHD_SOCKET: &str = "sshd.socket";
+
+/// The unit that actually gates SSH on this image. The Yocto OpenSSH recipe
+/// socket-activates sshd (`sshd.socket` + `sshd@.service`) and ships no
+/// `sshd.service`; driving the service there failed on enable and, worse,
+/// left SSH listening on disable.
+fn sshd_unit(sysroot: &Sysroot) -> &'static str {
+    let socket = [
+        "/usr/lib/systemd/system",
+        "/lib/systemd/system",
+        "/etc/systemd/system",
+    ]
+    .iter()
+    .any(|dir| sysroot.join(format!("{dir}/{SSHD_SOCKET}")).exists());
+    if socket {
+        SSHD_SOCKET
+    } else {
+        SSHD_SERVICE
+    }
+}
 const SERIAL_GETTY_UNIT: &str = "serial-getty@ttyS0.service";
 
 /// OpenSSH public-key type prefixes accepted in `authorized_keys`.
@@ -180,7 +201,7 @@ impl Applier for SshApplier {
 
         // sshd + serial-getty unit toggles (real root only).
         let prior_sshd = self.last_sshd.lock().unwrap().replace(ssh.sshd_enabled);
-        Self::set_unit(sysroot, SSHD_UNIT, ssh.sshd_enabled)?;
+        Self::set_unit(sysroot, sshd_unit(sysroot), ssh.sshd_enabled)?;
         let prior_getty = self
             .last_getty
             .lock()
@@ -212,7 +233,7 @@ impl Applier for SshApplier {
             b.restore()?;
         }
         if let Some(prev) = self.last_sshd.lock().unwrap().take() {
-            Self::set_unit(sysroot, SSHD_UNIT, prev)?;
+            Self::set_unit(sysroot, sshd_unit(sysroot), prev)?;
         }
         if let Some(prev) = self.last_getty.lock().unwrap().take() {
             if sysroot.is_real_root() {
@@ -319,5 +340,16 @@ mod tests {
 
         a.rollback(&sys).unwrap();
         assert!(std::fs::read_to_string(&path).unwrap().contains("first"));
+    }
+
+    #[test]
+    fn sshd_unit_prefers_socket_activation() {
+        let dir = tempfile::tempdir().unwrap();
+        let sysroot = Sysroot::at(dir.path());
+        assert_eq!(sshd_unit(&sysroot), SSHD_SERVICE);
+        let units = dir.path().join("usr/lib/systemd/system");
+        std::fs::create_dir_all(&units).unwrap();
+        std::fs::write(units.join(SSHD_SOCKET), "").unwrap();
+        assert_eq!(sshd_unit(&sysroot), SSHD_SOCKET);
     }
 }

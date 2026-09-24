@@ -1060,8 +1060,10 @@ impl DeviceOps {
             "users.list" => return CommandOutcome::ok_json("OK", listing(&store).to_string()),
             "users.create" => {
                 let password = str_arg("password");
-                if password.len() < 8 {
-                    return CommandOutcome::failure("INVALID_ARGUMENT", "password >= 8 chars");
+                if let Err(reason) =
+                    webconfig_engine::users::check_password_policy(&str_arg("username"), &password)
+                {
+                    return CommandOutcome::failure("INVALID_ARGUMENT", reason);
                 }
                 Role::parse(&str_arg("role"))
                     .and_then(|role| store.add(&str_arg("username"), &password, role))

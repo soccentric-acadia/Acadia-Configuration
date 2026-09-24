@@ -92,9 +92,31 @@ struct Attempt {
 /// T-P10 (B06): two instances — one keyed per-username (the classic credential
 /// stuffing throttle) and one keyed per source IP (one attacker IP can't
 /// spread guesses over unlimited usernames to bypass the username lockout).
+///
+/// CFG-018: with a `path` the counters survive a daemon restart — a crash
+/// (or a deliberate restart) must not hand an attacker a fresh set of
+/// guesses. The file is small (bounded by `MAX_TRACKED_USERNAMES`), rewritten
+/// atomically after every change, and entries older than the lockout window
+/// are dropped on load.
 #[derive(Debug, Default)]
 pub struct LoginThrottle {
     attempts: Mutex<HashMap<String, Attempt>>,
+    path: Option<std::path::PathBuf>,
+}
+
+/// On-disk form of one [`Attempt`]: `Instant` is process-local, so the
+/// failure time is stored as Unix seconds.
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedAttempt {
+    count: u32,
+    last_unix: u64,
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Per-request hard throttle ceiling for the per-IP instance: an IP sees
@@ -115,6 +137,65 @@ pub enum AttemptDecision {
 impl LoginThrottle {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A throttle whose state is persisted at `path` (CFG-018) and seeded
+    /// from it. A missing or unreadable file starts empty.
+    pub fn persistent(path: std::path::PathBuf) -> Self {
+        let mut attempts = HashMap::new();
+        let saved: HashMap<String, PersistedAttempt> = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        let now_unix = unix_now();
+        let now = Instant::now();
+        for (key, a) in saved {
+            let age = Duration::from_secs(now_unix.saturating_sub(a.last_unix));
+            if age >= LOCKOUT_DURATION || attempts.len() >= MAX_TRACKED_USERNAMES {
+                continue;
+            }
+            let last_attempt = now.checked_sub(age).unwrap_or(now);
+            attempts.insert(
+                key,
+                Attempt {
+                    count: a.count,
+                    last_attempt,
+                },
+            );
+        }
+        Self {
+            attempts: Mutex::new(attempts),
+            path: Some(path),
+        }
+    }
+
+    fn persist(&self, map: &HashMap<String, Attempt>) {
+        let Some(path) = &self.path else { return };
+        let now_unix = unix_now();
+        let now = Instant::now();
+        let out: HashMap<&String, PersistedAttempt> = map
+            .iter()
+            .map(|(k, a)| {
+                let age = now.duration_since(a.last_attempt).as_secs();
+                (
+                    k,
+                    PersistedAttempt {
+                        count: a.count,
+                        last_unix: now_unix.saturating_sub(age),
+                    },
+                )
+            })
+            .collect();
+        let Ok(bytes) = serde_json::to_vec(&out) else {
+            return;
+        };
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, bytes)
+            .and_then(|_| std::fs::rename(&tmp, path))
+            .is_err()
+        {
+            tracing::warn!(path = %path.display(), "login throttle state not persisted");
+        }
     }
 
     /// Atomically check lockout state and reserve this attempt's slot in one
@@ -167,11 +248,15 @@ impl LoginThrottle {
         let delay_ms = base.saturating_mul(1u64 << e.count.min(10)).min(cap);
         e.count = e.count.saturating_add(1);
         e.last_attempt = now;
+        self.persist(&map);
         AttemptDecision::Allowed { delay_ms }
     }
 
     async fn record_success(&self, username: &str) {
-        self.attempts.lock().await.remove(username);
+        let mut map = self.attempts.lock().await;
+        if map.remove(username).is_some() {
+            self.persist(&map);
+        }
     }
 }
 
@@ -279,7 +364,14 @@ pub async fn logout(session: Session) -> ApiResult<impl IntoResponse> {
 pub async fn whoami(State(app): State<AppState>, session: Session) -> ApiResult<impl IntoResponse> {
     let username: Option<String> = session.get(SK_USER).await.ok().flatten();
     let role: Option<String> = session.get(SK_ROLE).await.ok().flatten();
-    let csrf = csrf_token_from_session(&session).await;
+    // CFG-020: a CSRF token is only handed to an authenticated session —
+    // the auth routes (login/first-boot) sit outside the CSRF guard, and the
+    // frontend re-reads whoami after logging in.
+    let csrf = if username.is_some() {
+        Some(csrf_token_from_session(&session).await)
+    } else {
+        None
+    };
     let first_boot = app
         .load_users()
         .map(|u| u.needs_first_boot_admin())
@@ -313,11 +405,11 @@ pub async fn first_boot(
     session: Session,
     Json(req): Json<FirstBootRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    if req.username.is_empty() || req.password.len() < 8 {
-        return Err(ApiError::BadRequest(
-            "username required and password >= 8 chars".into(),
-        ));
+    if req.username.is_empty() {
+        return Err(ApiError::BadRequest("username required".into()));
     }
+    webconfig_engine::users::check_password_policy(&req.username, &req.password)
+        .map_err(ApiError::BadRequest)?;
     let mut users = app.load_users().map_err(|_| ApiError::Internal)?;
     if !users.needs_first_boot_admin() {
         return Err(ApiError::Conflict("first-boot already completed".into()));
@@ -539,6 +631,23 @@ mod tests {
         assert!(is_locked(&t, "alice").await);
         // A different username is unaffected — lockout is per-username.
         assert!(!is_locked(&t, "bob").await);
+    }
+
+    #[tokio::test]
+    async fn lockout_survives_restart_cfg018() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("throttle.json");
+        let t = LoginThrottle::persistent(path.clone());
+        for _ in 0..LOCKOUT_THRESHOLD {
+            t.begin_attempt("alice").await;
+        }
+        drop(t);
+        // A "restarted" daemon reloads the counters: still locked.
+        let t = LoginThrottle::persistent(path.clone());
+        assert!(is_locked(&t, "alice").await);
+        t.record_success("alice").await;
+        let t = LoginThrottle::persistent(path);
+        assert!(!is_locked(&t, "alice").await);
     }
 
     #[tokio::test]

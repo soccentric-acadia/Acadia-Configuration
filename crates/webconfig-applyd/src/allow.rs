@@ -6,7 +6,6 @@
 //! * [`SYSTEMCTL_*`] — the exact systemctl verbs/units the appliers drive;
 //! * [`WRITE_PREFIXES`]/[`WRITE_FILES`] — the exact filesystem paths the
 //!   appliers write;
-//! * [`PASSWORD_USERS`] — the accounts `chpasswd` may touch.
 //!
 //! Anything else is rejected. Keep every entry annotated with the applier
 //! that needs it so the next reviewer can trace each line back to a feature.
@@ -51,6 +50,7 @@ const SYSTEMCTL_UNIT_VERBS: &[&str] = &[
 /// journald, wifi).
 pub const SYSTEMCTL_FIXED_UNITS: &[&str] = &[
     "sshd.service",
+    "sshd.socket", // appliers/ssh.rs on a socket-activated image (Acadia)
     "systemd-networkd.service",
     "systemd-resolved.service",
     "systemd-timesyncd.service",
@@ -184,9 +184,6 @@ fn led_path_allowed(p: &str) -> bool {
     false
 }
 
-/// Accounts `chpasswd` may be pointed at (B04: root password from the UI).
-pub const PASSWORD_USERS: &[&str] = &["root", "rpi"];
-
 /// User:group pairs a write/mkdir may be chown'ed to (T-P11: the operator's
 /// authorized_keys must be operator-owned). Root keeps root ownership.
 pub const OWNER_ALLOWED: &[&str] = &["operator:operator", "root:root", "webconfig:webconfig"];
@@ -276,8 +273,8 @@ pub fn exec_allowed(program: &str, args: &[String]) -> bool {
         // (board-manifests/acadia.json); the argument is the staged firmware
         // file the daemon wrote under its own data dir.
         "pico-flash" => args.len() == 1 && !args[0].starts_with('-') && !args[0].contains(".."),
-        // Passwords only via the dedicated verb (never argv).
-        "chpasswd" => false,
+        // CFG-003: Linux account passwords are owned by the OS image, not
+        // WebConfig — chpasswd is never reachable through the helper.
         _ => false,
     }
 }
@@ -425,11 +422,6 @@ fn journalctl_args_allowed(args: &[String]) -> bool {
         }
     }
     !expect_unit
-}
-
-/// Whether a user may be passed to `chpasswd`.
-pub fn user_allowed(user: &str) -> bool {
-    PASSWORD_USERS.contains(&user)
 }
 
 /// Whether a file path may be written/removed/chmod'ed.
@@ -717,13 +709,5 @@ mod tests {
             "systemctl",
             &s(&["enable", "--now", "acadia-camera-capture.service"])
         ));
-    }
-
-    #[test]
-    fn password_users() {
-        assert!(user_allowed("root"));
-        assert!(user_allowed("rpi"));
-        assert!(!user_allowed("acaida"));
-        assert!(!user_allowed("nobody"));
     }
 }

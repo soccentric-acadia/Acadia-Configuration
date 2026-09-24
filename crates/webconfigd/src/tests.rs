@@ -234,7 +234,7 @@ async fn first_boot_creates_admin_and_authenticates() {
         "/api/v1/auth/first-boot",
         None,
         None,
-        Some(r#"{"username":"admin","password":"password1"}"#),
+        Some(r#"{"username":"admin","password":"Kettle-Harbor-41"}"#),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -303,7 +303,7 @@ async fn session_cookie_is_secure_and_http_only_on_the_wire() {
         .uri("/api/v1/auth/first-boot")
         .header("content-type", "application/json")
         .body(Body::from(
-            r#"{"username":"admin","password":"password1"}"#.to_string(),
+            r#"{"username":"admin","password":"Kettle-Harbor-41"}"#.to_string(),
         ))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -334,7 +334,7 @@ async fn csrf_guard_rejects_mutations_without_token() {
         "/api/v1/auth/first-boot",
         None,
         None,
-        Some(r#"{"username":"admin","password":"password1"}"#),
+        Some(r#"{"username":"admin","password":"Kettle-Harbor-41"}"#),
     )
     .await;
     let cookie = ck.unwrap();
@@ -359,7 +359,7 @@ async fn viewer_role_cannot_mutate_admin_only_routes() {
         "/api/v1/auth/first-boot",
         None,
         None,
-        Some(r#"{"username":"admin","password":"password1"}"#),
+        Some(r#"{"username":"admin","password":"Kettle-Harbor-41"}"#),
     )
     .await;
     let admin_cookie = admin_ck.unwrap();
@@ -384,7 +384,7 @@ async fn viewer_role_cannot_mutate_admin_only_routes() {
         "/api/v1/system/users",
         Some(&admin_cookie),
         Some(&admin_csrf),
-        Some(r#"{"username":"watcher","password":"password1","role":"viewer"}"#),
+        Some(r#"{"username":"watcher","password":"Kettle-Harbor-41","role":"viewer"}"#),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -396,7 +396,7 @@ async fn viewer_role_cannot_mutate_admin_only_routes() {
         "/api/v1/auth/login",
         None,
         None,
-        Some(r#"{"username":"watcher","password":"password1"}"#),
+        Some(r#"{"username":"watcher","password":"Kettle-Harbor-41"}"#),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -449,7 +449,7 @@ async fn operator_role_can_mutate_apps_but_not_admin_only_routes() {
         "/api/v1/system/users",
         Some(&admin_cookie),
         Some(&admin_csrf),
-        Some(r#"{"username":"tech","password":"password1","role":"operator"}"#),
+        Some(r#"{"username":"tech","password":"Kettle-Harbor-41","role":"operator"}"#),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -460,7 +460,7 @@ async fn operator_role_can_mutate_apps_but_not_admin_only_routes() {
         "/api/v1/auth/login",
         None,
         None,
-        Some(r#"{"username":"tech","password":"password1"}"#),
+        Some(r#"{"username":"tech","password":"Kettle-Harbor-41"}"#),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -603,7 +603,7 @@ async fn app_settings_put_fires_schema_apply_hook() {
         "/api/v1/auth/first-boot",
         None,
         None,
-        Some(r#"{"username":"admin","password":"password1"}"#),
+        Some(r#"{"username":"admin","password":"Kettle-Harbor-41"}"#),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -654,7 +654,7 @@ async fn boot_admin(app: &axum::Router) -> (String, String) {
         "/api/v1/auth/first-boot",
         None,
         None,
-        Some(r#"{"username":"admin","password":"password1"}"#),
+        Some(r#"{"username":"admin","password":"Kettle-Harbor-41"}"#),
     )
     .await;
     let cookie = ck.unwrap();
@@ -1136,7 +1136,7 @@ async fn factory_reset_wipes_certs_and_alert_history() {
         "/api/v1/auth/first-boot",
         None,
         None,
-        Some(r#"{"username":"admin","password":"password1"}"#),
+        Some(r#"{"username":"admin","password":"Kettle-Harbor-41"}"#),
     )
     .await;
     let cookie = ck.unwrap();
@@ -1437,8 +1437,8 @@ async fn network_scan_and_connectivity_test_via_http() {
 }
 
 #[tokio::test]
-async fn reboot_shutdown_root_password_last_admin_guard_and_groups_via_http() {
-    // Checkpoint 4.8: reboot/shutdown/root-password/last-admin-guard/group
+async fn reboot_shutdown_password_policy_last_admin_guard_and_groups_via_http() {
+    // Checkpoint 4.8: reboot/shutdown/password-policy/last-admin-guard/group
     // management, all via real HTTP (none had any coverage before).
     let (app, _dir) = build_app().await;
     let (cookie, csrf) = boot_admin(&app).await;
@@ -1470,31 +1470,8 @@ async fn reboot_shutdown_root_password_last_admin_guard_and_groups_via_http() {
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["shutting_down"], true);
 
-    // --- root password: too short is rejected, a valid one succeeds ---
-    let (st, _, _) = send(
-        &app,
-        "POST",
-        "/api/v1/system/root-password",
-        Some(&cookie),
-        Some(&csrf),
-        Some(r#"{"password":"short"}"#),
-    )
-    .await;
-    assert_eq!(st, StatusCode::BAD_REQUEST);
-
-    // An embedded newline would inject an extra `user:password` line into
-    // chpasswd's stdin — must be rejected, not passed through.
-    let (st, _, _) = send(
-        &app,
-        "POST",
-        "/api/v1/system/root-password",
-        Some(&cookie),
-        Some(&csrf),
-        Some(r#"{"password":"long-enough\nattacker:pwned"}"#),
-    )
-    .await;
-    assert_eq!(st, StatusCode::BAD_REQUEST);
-
+    // --- CFG-003: the root-password control is gone (the OS owns Linux
+    // accounts); the route no longer exists ---
     let (st, _, _) = send(
         &app,
         "POST",
@@ -1504,7 +1481,25 @@ async fn reboot_shutdown_root_password_last_admin_guard_and_groups_via_http() {
         Some(r#"{"password":"a-real-root-password"}"#),
     )
     .await;
-    assert_eq!(st, StatusCode::OK);
+    assert!(
+        matches!(st, StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED),
+        "root-password route must be gone, got {st}"
+    );
+
+    // --- CFG-019: account creation enforces the shared password policy ---
+    for weak in ["short", "Password123!", "admin3-secret-pw", "0123456789"] {
+        let body = serde_json::json!({"username": "admin3", "password": weak, "role": "viewer"});
+        let (st, _, _) = send(
+            &app,
+            "POST",
+            "/api/v1/system/users",
+            Some(&cookie),
+            Some(&csrf),
+            Some(&body.to_string()),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{weak} must be rejected");
+    }
 
     // --- last-admin-delete guard: the only admin cannot be deleted ---
     let (st, _, body) = send(
@@ -1529,7 +1524,7 @@ async fn reboot_shutdown_root_password_last_admin_guard_and_groups_via_http() {
         "/api/v1/system/users",
         Some(&cookie),
         Some(&csrf),
-        Some(r#"{"username":"admin2","password":"password1","role":"admin"}"#),
+        Some(r#"{"username":"admin2","password":"Kettle-Harbor-41","role":"admin"}"#),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -1556,7 +1551,7 @@ async fn reboot_shutdown_root_password_last_admin_guard_and_groups_via_http() {
         "/api/v1/auth/login",
         None,
         None,
-        Some(r#"{"username":"admin2","password":"password1"}"#),
+        Some(r#"{"username":"admin2","password":"Kettle-Harbor-41"}"#),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -2110,7 +2105,7 @@ async fn cert_store_upload_list_delete_round_trip() {
         "/api/v1/auth/first-boot",
         None,
         None,
-        Some(r#"{"username":"admin","password":"password1"}"#),
+        Some(r#"{"username":"admin","password":"Kettle-Harbor-41"}"#),
     )
     .await;
     let cookie = ck.unwrap();
@@ -2851,7 +2846,7 @@ async fn first_boot_requires_claim_code_when_provisioned() {
         "/api/v1/auth/first-boot",
         None,
         None,
-        Some(r#"{"username":"admin","password":"password1"}"#),
+        Some(r#"{"username":"admin","password":"Kettle-Harbor-41"}"#),
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
@@ -2863,7 +2858,7 @@ async fn first_boot_requires_claim_code_when_provisioned() {
         "/api/v1/auth/first-boot",
         None,
         None,
-        Some(r#"{"username":"admin","password":"password1","claim_code":"WRONGCOD"}"#),
+        Some(r#"{"username":"admin","password":"Kettle-Harbor-41","claim_code":"WRONGCOD"}"#),
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
@@ -2875,7 +2870,7 @@ async fn first_boot_requires_claim_code_when_provisioned() {
         "/api/v1/auth/first-boot",
         None,
         None,
-        Some(r#"{"username":"admin","password":"password1","claim_code":"ABCD1234"}"#),
+        Some(r#"{"username":"admin","password":"Kettle-Harbor-41","claim_code":"ABCD1234"}"#),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -2921,7 +2916,7 @@ async fn role_change_takes_effect_immediately() {
         "/api/v1/auth/first-boot",
         None,
         None,
-        Some(r#"{"username":"admin","password":"password1"}"#),
+        Some(r#"{"username":"admin","password":"Kettle-Harbor-41"}"#),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -2947,7 +2942,7 @@ async fn role_change_takes_effect_immediately() {
         "/api/v1/system/users",
         Some(&cookie),
         Some(&csrf),
-        Some(r#"{"username":"temp","password":"password2","role":"viewer"}"#),
+        Some(r#"{"username":"temp","password":"Kettle-Harbor-42","role":"viewer"}"#),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -2957,7 +2952,11 @@ async fn role_change_takes_effect_immediately() {
     // store refuses to demote the last admin.
     let mut users = webconfig_engine::users::UserStore::load(&users_path).unwrap();
     users
-        .add("admin2", "password2", webconfig_engine::users::Role::Admin)
+        .add(
+            "admin2",
+            "Kettle-Harbor-42",
+            webconfig_engine::users::Role::Admin,
+        )
         .unwrap();
     users.save(&users_path).unwrap();
     users
@@ -2973,7 +2972,7 @@ async fn role_change_takes_effect_immediately() {
         "/api/v1/system/users",
         Some(&cookie),
         Some(&csrf),
-        Some(r#"{"username":"temp2","password":"password2","role":"viewer"}"#),
+        Some(r#"{"username":"temp2","password":"Kettle-Harbor-42","role":"viewer"}"#),
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
@@ -2991,7 +2990,7 @@ async fn deleted_user_session_is_rejected() {
         "/api/v1/auth/first-boot",
         None,
         None,
-        Some(r#"{"username":"admin","password":"password1"}"#),
+        Some(r#"{"username":"admin","password":"Kettle-Harbor-41"}"#),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -3019,7 +3018,7 @@ async fn hq_write_merges_sections_and_reports_appliers() {
         "/api/v1/auth/first-boot",
         None,
         None,
-        Some(r#"{"username":"admin","password":"password1"}"#),
+        Some(r#"{"username":"admin","password":"Kettle-Harbor-41"}"#),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -3154,7 +3153,7 @@ async fn tp20_users_commands_roundtrip_with_local_rules() {
     let ops = tp20_ops(&state);
     let created = ops.users(
         "users.create",
-        &serde_json::json!({"username": "ops1", "password": "password9", "role": "operator"}),
+        &serde_json::json!({"username": "ops1", "password": "Kettle-Harbor-49", "role": "operator"}),
     );
     assert!(created.success, "{}", created.message);
     assert!(created.json_payload.contains("\"ops1\""));

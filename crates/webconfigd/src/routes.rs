@@ -68,7 +68,6 @@ pub fn build_router(state: AppState, static_dir: std::path::PathBuf) -> Router {
         .route("/system/reboot", post(system::reboot))
         .route("/system/shutdown", post(system::shutdown))
         .route("/system/factory-reset", post(system::factory_reset))
-        .route("/system/root-password", post(system::root_password))
         .route(
             "/system/users",
             get(system::list_users).post(system::create_user),

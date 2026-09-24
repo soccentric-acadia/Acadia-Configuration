@@ -67,8 +67,13 @@ pub(crate) async fn build(sysroot: Sysroot) -> Application {
         update_backend: crate::update_backend::make_backend(&sysroot),
         systemd: crate::systemd::make_client(&sysroot).await,
         users_path: database,
-        login_throttle: Arc::new(LoginThrottle::new()),
-        ip_throttle: Arc::new(LoginThrottle::new()),
+        // CFG-018: lockout counters survive a daemon restart.
+        login_throttle: Arc::new(LoginThrottle::persistent(
+            webconfig_dir.join("login-throttle-user.json"),
+        )),
+        ip_throttle: Arc::new(LoginThrottle::persistent(
+            webconfig_dir.join("login-throttle-ip.json"),
+        )),
         sse_connections: Arc::new(tokio::sync::Semaphore::new(MAX_SSE_CONNECTIONS)),
         pairing: Arc::new(std::sync::Mutex::new(
             webconfig_engine::pairing::PairingAgent::load(&webconfig_dir),

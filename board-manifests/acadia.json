@@ -6,11 +6,24 @@
   "has_tpm": false,
   "secure_boot": false,
   "service_allowlist": [
-    "sshd.service",
+    "sshd.socket",
     "systemd-networkd.service",
     "systemd-resolved.service",
     "wpa_supplicant.service",
-    "webconfigd.service"
+    "chronyd.service",
+    "rsyslog.service",
+    "watchdog.service",
+    "swupdate.service",
+    "acadia-client.service",
+    "instr-istate.service",
+    "instr-alarms.service",
+    "instr-backup.service",
+    "instr-faults.service",
+    "instr-hardware.service",
+    "instr-logmanager.service",
+    "instr-monitord.service",
+    "instr-networkd.service",
+    "instr-telemetry.service"
   ],
   "peripherals": [
     {

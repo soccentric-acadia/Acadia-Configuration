@@ -279,26 +279,6 @@ pub fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     check(request(payload)?, "set_mode")
 }
 
-/// `chpasswd` for `user` (stdin-only, never argv) through the helper.
-pub fn set_password(user: &str, password: &str) -> Result<(), std::io::Error> {
-    let payload = serde_json::json!({
-        "verb": "set_password",
-        "user": user,
-        "password": password,
-    })
-    .to_string();
-    let reply = request(payload)?;
-    if reply.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
-        let stderr = reply
-            .get("stderr")
-            .and_then(serde_json::Value::as_str)
-            .or_else(|| reply.get("error").and_then(serde_json::Value::as_str))
-            .unwrap_or("rejected");
-        return Err(io_err("set_password", stderr));
-    }
-    Ok(())
-}
-
 /// Point `/boot/autoboot.txt` at tryboot `slot` ("A"/"B") through the helper
 /// and optionally drop `/boot/boot_state` (T-P26, CFG-039).
 pub fn boot_select(slot: &str, clear_state: bool) -> std::io::Result<()> {

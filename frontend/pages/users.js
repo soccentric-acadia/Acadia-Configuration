@@ -41,9 +41,9 @@ export async function render(api, store) {
                 Button({
                     variant: 'link', size: 'sm', title: `Reset the password for ${user.username}`,
                     onClick: async () => {
-                        const password = await promptDialog({ title: `Reset password for ${user.username}`, label: 'New password (min 8)', type: 'password', confirmLabel: 'Set password' });
+                        const password = await promptDialog({ title: `Reset password for ${user.username}`, label: 'New password (min 10)', type: 'password', confirmLabel: 'Set password' });
                         if (password == null) return;
-                        if (password.length < 8) { store.toast('Password must be at least 8 characters', 'error'); return; }
+                        if (password.length < 10) { store.toast('Password must be at least 10 characters', 'error'); return; }
                         await api.put(`/api/v1/system/users/${encodeURIComponent(user.username)}/password`, { password });
                         store.toast('Password updated', 'success');
                     },
@@ -68,12 +68,12 @@ export async function render(api, store) {
                     title: 'Add user', confirmLabel: 'Create',
                     fields: [
                         { key: 'username', label: 'Username' },
-                        { key: 'password', label: 'Password (min 8)', type: 'password' },
+                        { key: 'password', label: 'Password (min 10)', type: 'password' },
                         { key: 'role', label: 'Role: admin / operator / viewer', placeholder: 'viewer' },
                     ],
                 });
                 if (!result || !result.username || !result.password) return;
-                if (result.password.length < 8) { store.toast('Password must be at least 8 characters', 'error'); return; }
+                if (result.password.length < 10) { store.toast('Password must be at least 10 characters', 'error'); return; }
                 await api.post('/api/v1/system/users', { username: result.username, password: result.password, role: result.role || 'viewer' });
                 refresh();
             },
@@ -81,17 +81,6 @@ export async function render(api, store) {
     }, userRows.length
         ? Table({ columns: ['User', 'Role', 'Groups', ''], caption: 'Users' }, userRows).element
         : EmptyState({ title: 'No users configured' }));
-
-    const rootPassword = Field({ label: 'New root password (min 8)', type: 'password' });
-    const rootCard = Card({ title: 'Root password', subtitle: 'Change the Linux root password used for local administration.' }, rootPassword.wrap,
-        ActionList(ActionRow('Set root password', 'Replace the current root password with the new value.', Button({
-            onClick: async () => {
-                if (rootPassword.get().length < 8) { store.toast('Password must be at least 8 characters', 'error'); return; }
-                await api.post('/api/v1/system/root-password', { password: rootPassword.get() });
-                store.toast('Root password set', 'success');
-                rootPassword.set('');
-            },
-        }, 'Set password'))));
 
     const groupCards = (groups || []).map((group) => {
         const membersList = group.members || [];
@@ -156,7 +145,6 @@ export async function render(api, store) {
     return el('div', {},
         el('div', { class: 'page-header' }, el('h1', {}, 'Users & Groups'), el('p', {}, 'Manage local accounts, roles, groups, and group membership.')),
         usersCard,
-        rootCard,
         groupsHeader,
         groupCards.length
             ? el('div', { class: 'card-grid' }, ...groupCards)

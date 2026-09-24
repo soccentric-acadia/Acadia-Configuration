@@ -4,8 +4,9 @@
 //! **admin / operator / viewer** (admin: everything; operator: app settings +
 //! service restart only; viewer: read-only). First boot has **no default
 //! password** — the API forces admin password creation on first access
-//! (spec §4.8, CRA/SB-327 compliance). Changing the Linux root password is a
-//! separate single action (`chpasswd`) handled by the HTTP layer, not here.
+//! (spec §4.8, CRA/SB-327 compliance). Linux accounts (root, operator) are
+//! owned by the OS image, not WebConfig (CFG-003): there is no root-password
+//! control and the privileged helper cannot run `chpasswd`.
 //!
 use std::path::{Path, PathBuf};
 
@@ -44,6 +45,94 @@ pub enum UserError {
     LastAdmin,
     #[error("invalid role: {0}")]
     InvalidRole(String),
+}
+
+/// Minimum WebConfig account password length (CFG-019).
+pub const MIN_PASSWORD_LEN: usize = 10;
+
+/// Passwords that pass a length check but appear at the top of every
+/// breach corpus, plus the product's own names. Compared case-insensitively
+/// after stripping trailing digits/punctuation ("Password123!" → "password").
+const COMMON_PASSWORDS: &[&str] = &[
+    "password",
+    "passw0rd",
+    "p@ssw0rd",
+    "qwerty",
+    "qwertyuiop",
+    "letmein",
+    "welcome",
+    "admin",
+    "administrator",
+    "root",
+    "changeme",
+    "default",
+    "iloveyou",
+    "monkey",
+    "dragon",
+    "football",
+    "baseball",
+    "sunshine",
+    "princess",
+    "trustno",
+    "abc",
+    "abcdef",
+    "abcdefgh",
+    "asdfgh",
+    "asdfghjkl",
+    "zxcvbnm",
+    "master",
+    "superman",
+    "acadia",
+    "webconfig",
+    "raspberry",
+    "raspberrypi",
+    "jetson",
+    "nvidia",
+    "operator",
+    "secret",
+    "login",
+    "guest",
+    "user",
+];
+
+/// Shared WebConfig password policy (CFG-019), enforced at first-boot,
+/// admin password change and the HQ `users.create` command:
+/// at least [`MIN_PASSWORD_LEN`] characters, not only one repeated or
+/// sequential run, no control characters, does not contain the username,
+/// and not a common/breached password once trailing digits and symbols are
+/// removed. Returns a human-readable reason on rejection.
+pub fn check_password_policy(username: &str, password: &str) -> Result<(), String> {
+    if password.chars().count() < MIN_PASSWORD_LEN {
+        return Err(format!(
+            "password must be at least {MIN_PASSWORD_LEN} characters"
+        ));
+    }
+    if password.chars().any(|c| c.is_control()) {
+        return Err("password must not contain control characters".into());
+    }
+    let lower = password.to_lowercase();
+    let user = username.trim().to_lowercase();
+    if user.len() >= 3 && lower.contains(&user) {
+        return Err("password must not contain the username".into());
+    }
+    let chars: Vec<char> = lower.chars().collect();
+    if chars.iter().all(|c| *c == chars[0]) {
+        return Err("password must not be a single repeated character".into());
+    }
+    let sequential = chars.windows(2).all(|w| (w[1] as i64 - w[0] as i64) == 1)
+        || chars.windows(2).all(|w| (w[0] as i64 - w[1] as i64) == 1);
+    if sequential {
+        return Err("password must not be a simple sequence".into());
+    }
+    let stem = lower.trim_end_matches(|c: char| !c.is_alphabetic());
+    let stem = stem.trim_start_matches(|c: char| !c.is_alphabetic());
+    if stem.is_empty() {
+        return Err("password must contain letters".into());
+    }
+    if COMMON_PASSWORDS.contains(&stem) {
+        return Err("password is too common; choose a less guessable one".into());
+    }
+    Ok(())
 }
 
 /// Authorization role (spec §4.1).
@@ -449,6 +538,22 @@ mod tests {
             store.set_role("admin", Role::Viewer),
             Err(UserError::LastAdmin)
         ));
+    }
+
+    #[test]
+    fn password_policy_cfg019() {
+        let ok = |p: &str| check_password_policy("admin", p);
+        assert!(ok("short1!").is_err());
+        assert!(ok("Password123!").is_err(), "common stem");
+        assert!(ok("acadia2026!!").is_err(), "product name");
+        assert!(ok("myadminpass99").is_err(), "contains username");
+        assert!(ok("aaaaaaaaaaaa").is_err());
+        assert!(ok("abcdefghijkl").is_err());
+        assert!(ok("12345678901").is_err());
+        assert!(ok("0123456789").is_err());
+        assert!(ok("pass\nroot:x").is_err());
+        assert!(ok("correct-horse-battery").is_ok());
+        assert!(ok("Tr4vel-Kettle-9").is_ok());
     }
 
     #[test]

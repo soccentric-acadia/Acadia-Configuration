@@ -8,7 +8,8 @@
 //      polkit involved (the helper's own allowlist is the boundary).
 //
 // The allowlist below therefore mirrors webconfig-applyd's SYSTEMCTL_*
-// tables EXACTLY — update both together (T-P02). It is NOT blanket Manager
+// tables — update both together (T-P02) — plus the product services the
+// Services page manages (CFG-008), which no applier drives. It is NOT blanket Manager
 // access: only the verbs and units the appliers actually use.
 
 polkit.addRule(function(action, subject) {
@@ -28,9 +29,14 @@ polkit.addRule(function(action, subject) {
     if (managed) {
         var unit = action.lookup("unit");
         // Fixed units the appliers and the Services page drive
-        // (webconfig-applyd allow::SYSTEMCTL_FIXED_UNITS).
+        // (webconfig-applyd allow::SYSTEMCTL_FIXED_UNITS), then — from
+        // watchdog.service on — the product services the Services page and
+        // HQ service.control manage (CFG-008, board-manifests/acadia.json
+        // service_allowlist); no applier drives those, so they are absent
+        // from webconfig-applyd's tables.
         var allowed = [
             "sshd.service",
+            "sshd.socket",
             "systemd-networkd.service",
             "systemd-resolved.service",
             "systemd-timesyncd.service",
@@ -43,9 +49,22 @@ polkit.addRule(function(action, subject) {
             "chrony.service",
             "chronyd.service",
             "webconfig-syslog-forward.service",
+            "rsyslog.service",
             "webconfigd.service",
             "swupdate.service",
-            "swupdate.socket"
+            "swupdate.socket",
+            "acadia-camera-capture.service",
+            "watchdog.service",
+            "acadia-client.service",
+            "instr-istate.service",
+            "instr-alarms.service",
+            "instr-backup.service",
+            "instr-faults.service",
+            "instr-hardware.service",
+            "instr-logmanager.service",
+            "instr-monitord.service",
+            "instr-networkd.service",
+            "instr-telemetry.service"
         ];
         // Dynamic per-device units the appliers generate
         // (webconfig-applyd allow::SYSTEMCTL_DYNAMIC_PREFIXES): can-<n>,

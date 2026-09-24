@@ -492,6 +492,8 @@ pub async fn create_user(
 ) -> ApiResult<Json<UserPublic>> {
     role.require_admin("users.create")?;
     let parsed = Role::parse(&req.role).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    webconfig_engine::users::check_password_policy(&req.username, &req.password)
+        .map_err(ApiError::BadRequest)?;
     let mut store = app.load_users().map_err(|_| ApiError::Internal)?;
     store
         .add(&req.username, &req.password, parsed)
@@ -691,9 +693,8 @@ pub async fn change_password(
     Json(req): Json<ChangePasswordRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     role.require_admin("users.change_password")?;
-    if req.password.len() < 8 {
-        return Err(ApiError::BadRequest("password >= 8 chars".into()));
-    }
+    webconfig_engine::users::check_password_policy(&name, &req.password)
+        .map_err(ApiError::BadRequest)?;
     let mut store = app.load_users().map_err(|_| ApiError::Internal)?;
     store.set_password(&name, &req.password)?;
     app.save_users(&store).map_err(|_| ApiError::Internal)?;
@@ -703,50 +704,6 @@ pub async fn change_password(
         "users.change_password",
         Some(name.clone()),
     );
-    Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-/// `POST /api/v1/system/root-password` — change Linux root password via
-/// `chpasswd` (spec §4.1). Separate single action, admin only.
-#[derive(Deserialize)]
-pub struct RootPasswordRequest {
-    pub password: String,
-}
-
-pub async fn root_password(
-    State(app): State<AppState>,
-    role: AuthRole,
-    session: Session,
-    Json(req): Json<RootPasswordRequest>,
-) -> ApiResult<Json<serde_json::Value>> {
-    role.require_admin("system.root_password")?;
-    if req.password.len() < 8 {
-        return Err(ApiError::BadRequest("password >= 8 chars".into()));
-    }
-    // The password is written as a `root:{password}\n` line to chpasswd's
-    // stdin — an embedded newline would let it inject additional
-    // `user:password` lines (setting another account's password), and other
-    // control characters have no legitimate reason to appear in a password
-    // typed by a human.
-    if req.password.bytes().any(|b| b.is_ascii_control()) {
-        return Err(ApiError::BadRequest(
-            "password must not contain control characters or newlines".into(),
-        ));
-    }
-    audit(
-        &app,
-        &username(&session).await,
-        "system.root_password",
-        None,
-    );
-    if app.engine.sysroot.is_real_root() {
-        // T-P02: the password never travels on argv — the privileged helper
-        // pipes it to chpasswd on stdin; direct spawn stays for root dev runs.
-        webconfig_engine::priv_client::set_password("root", &req.password).map_err(|e| {
-            tracing::error!(error = %e, "root password change failed");
-            ApiError::Internal
-        })?;
-    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

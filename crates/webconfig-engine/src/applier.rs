@@ -136,8 +136,7 @@ pub fn sha256_file(path: &std::path::Path) -> std::io::Result<(u64, String)> {
 
 /// Helper: run an external command, capturing stderr, mapping non-zero exit to
 /// [`ApplyError::Command`]. Commands are only used by appliers that shell out
-/// to well-known OS verbs (hostnamectl, timedatectl, ip, nft, wg, journalctl,
-/// chpasswd). The sysroot parameter is *not* applied to the command here —
+/// to well-known OS verbs (hostnamectl, timedatectl, ip, nft, wg, journalctl). The sysroot parameter is *not* applied to the command here —
 /// commands that honor a root (`--root=`) pass it themselves; tests use the
 /// file-writing appliers instead. Kept as a shared helper to keep error shape
 /// uniform.

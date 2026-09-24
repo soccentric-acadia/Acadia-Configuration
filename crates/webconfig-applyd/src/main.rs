@@ -37,7 +37,7 @@ pub mod allow;
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -80,8 +80,6 @@ pub enum Request {
     RemoveFile { path: String },
     /// chmod one allowlisted path (e.g. 0600 on secret-bearing files).
     SetMode { path: String, mode: u32 },
-    /// `chpasswd` on stdin — the only sanctioned password path (never argv).
-    SetPassword { user: String, password: String },
     /// Point the firmware at a tryboot slot permanently (T-P26, CFG-039):
     /// atomically rewrite `/boot/autoboot.txt` to `boot_prefix=<slot>/` and,
     /// when `clear_state` is set, drop `/boot/boot_state`. Used by the
@@ -192,7 +190,6 @@ pub fn handle(request: &str) -> Reply {
         Request::Mkdir { path, mode, owner } => handle_mkdir(&path, mode, &owner),
         Request::RemoveFile { path } => handle_remove(&path),
         Request::SetMode { path, mode } => handle_set_mode(&path, mode),
-        Request::SetPassword { user, password } => handle_set_password(&user, &password),
         Request::BootSelect { slot, clear_state } => {
             handle_boot_select(Path::new(BOOT_DIR), &slot, clear_state)
         }
@@ -303,46 +300,6 @@ fn handle_set_mode(path: &str, mode: u32) -> Reply {
     match std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
         Ok(()) => Reply::ok(),
         Err(e) => Reply::err(format!("chmod {path:?}: {e}")),
-    }
-}
-
-fn handle_set_password(user: &str, password: &str) -> Reply {
-    if !allow::user_allowed(user) {
-        return Reply::err(format!("user rejected by allowlist: {user}"));
-    }
-    let mut child = match std::process::Command::new("chpasswd")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => return Reply::err(format!("spawn chpasswd: {e}")),
-    };
-    {
-        let Some(stdin) = child.stdin.as_mut() else {
-            return Reply::err("chpasswd stdin unavailable");
-        };
-        if writeln!(stdin, "{user}:{password}").is_err() {
-            let _ = child.kill();
-            return Reply::err("chpasswd stdin write failed");
-        }
-    }
-    // Drop stdin explicitly → EOF for chpasswd (otherwise it blocks forever).
-    drop(child.stdin.take());
-    match child.wait() {
-        Ok(status) => {
-            let mut out = String::new();
-            let mut err = String::new();
-            if let Some(mut o) = child.stdout.take() {
-                let _ = o.read_to_string(&mut out);
-            }
-            if let Some(mut s) = child.stderr.take() {
-                let _ = s.read_to_string(&mut err);
-            }
-            Reply::exec(out, err, status.code().unwrap_or(-1))
-        }
-        Err(e) => Reply::err(format!("chpasswd wait: {e}")),
     }
 }
 
