@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-09-24 — Integration-production pass (T-P20…T-P35, backlog)
+
+- T-P20: HQ-driven power, update confirm/rollback, service control, log bundles and users.* on the device; power actions run 5 s after the ack. Typed HQ commands execute locally rather than being relayed to istate (`465e5e2`).
+- T-P22/T-P24/T-P25: upload correlation (`client_ref`, UploadComplete), the DeviceStatus heartbeat snapshot, and the configuration operations contract plus a vendored Instrumentation catalog.
+- T-P26…T-P29:
+  - applyd `boot_select` verb and SWUpdate client install;
+  - telemetry publisher, with curl/mosquitto run locally;
+  - streaming SHA-256 and OTA staging under `/var/lib/webconfig-ota`;
+  - board-LED policy and camera applier;
+  - remote syslog through rsyslog omfwd.
+- T-P00e: deferred features (ptp, ap_mode, wireguard, cellular) are hidden in the UI and refused by the server.
+- T-P33: a single factory-reset contract with levels settings, settings+users and full (RMA). The full wipe runs at next boot (`acadia-factory-wipe`). The claim code is kept, so a reset device can only be re-claimed with its label code.
+- P-A10/OS-071: first-use provisioning (`/api/v1/provisioning`) covers the HQ CA, the config-signing key and the IV&V client config, and adds a Provisioning page.
+- CFG-003/008/018/019/020:
+  - the root-password control and helper `chpasswd` are removed;
+  - a shared password policy (≥10 characters, common/username/sequence checks) is enforced everywhere, including `POST /system/users`;
+  - the login throttle persists across restarts;
+  - `whoami` returns CSRF only when authenticated;
+  - the service allowlist now lists the product services.
+- SSH toggling now drives `sshd.socket` on the socket-activated image. Previously, disabling SSH left it listening.
+- CFG-034: the OS image-wiring gate runs in CI, and the binary-size CI step was fixed.
+- Validation: `make check` green at every commit; cross-repo E2E 15/15; `make build BOARD=rpi5` with webconfigd `1063cac`.
+
 ## 2026-09-21 — Cross-repo API surface audit: webconfigd contract consumption (task 009)
 
 ### Added
