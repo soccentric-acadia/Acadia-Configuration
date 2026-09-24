@@ -1344,51 +1344,6 @@ pub async fn run_data_bridge(
     }
 }
 
-#[cfg(test)]
-mod upload_coordinator_tests {
-    use super::*;
-
-    fn upload(kind: pb::log_upload_request::Kind, name: &str) -> PendingUpload {
-        PendingUpload {
-            kind,
-            path: PathBuf::from(name),
-            size_bytes: 1,
-            client_ref: String::new(),
-        }
-    }
-
-    /// T-P22: an echoed client_ref selects exactly its blob, even when
-    /// uploads of both kinds interleave (positional matching could PUT a
-    /// backup into a log-bundle object).
-    #[test]
-    fn client_ref_selects_the_matching_upload() {
-        let c = UploadCoordinator::new();
-        let bundle = c.register(upload(pb::log_upload_request::Kind::LogBundle, "bundle"));
-        let backup = c.register(upload(pb::log_upload_request::Kind::Backup, "backup"));
-        assert_ne!(bundle, backup);
-        let got = c
-            .take_for(&backup, pb::log_upload_request::Kind::LogBundle)
-            .unwrap();
-        assert_eq!(got.path, PathBuf::from("backup"));
-        assert!(c
-            .take_for(&backup, pb::log_upload_request::Kind::Backup)
-            .is_none());
-        assert_eq!(c.pending_count(), 1);
-    }
-
-    /// Pre-T-P22 gateway (no echo): positional by kind, as before.
-    #[test]
-    fn empty_client_ref_falls_back_to_kind() {
-        let c = UploadCoordinator::new();
-        c.register(upload(pb::log_upload_request::Kind::LogBundle, "bundle"));
-        c.register(upload(pb::log_upload_request::Kind::Backup, "backup"));
-        let got = c
-            .take_for("", pb::log_upload_request::Kind::Backup)
-            .unwrap();
-        assert_eq!(got.path, PathBuf::from("backup"));
-    }
-}
-
 // ── T-P24: device status snapshot for the HQ heartbeat ────────────────────
 
 /// How often the heartbeat snapshot is refreshed.
@@ -1474,5 +1429,50 @@ pub async fn run_status_snapshot(ops: Arc<DeviceOps>) {
         let status = ops.status_snapshot().await;
         hq_agent::set_device_status(status);
         tokio::time::sleep(STATUS_SNAPSHOT_INTERVAL).await;
+    }
+}
+
+#[cfg(test)]
+mod upload_coordinator_tests {
+    use super::*;
+
+    fn upload(kind: pb::log_upload_request::Kind, name: &str) -> PendingUpload {
+        PendingUpload {
+            kind,
+            path: PathBuf::from(name),
+            size_bytes: 1,
+            client_ref: String::new(),
+        }
+    }
+
+    /// T-P22: an echoed client_ref selects exactly its blob, even when
+    /// uploads of both kinds interleave (positional matching could PUT a
+    /// backup into a log-bundle object).
+    #[test]
+    fn client_ref_selects_the_matching_upload() {
+        let c = UploadCoordinator::new();
+        let bundle = c.register(upload(pb::log_upload_request::Kind::LogBundle, "bundle"));
+        let backup = c.register(upload(pb::log_upload_request::Kind::Backup, "backup"));
+        assert_ne!(bundle, backup);
+        let got = c
+            .take_for(&backup, pb::log_upload_request::Kind::LogBundle)
+            .unwrap();
+        assert_eq!(got.path, PathBuf::from("backup"));
+        assert!(c
+            .take_for(&backup, pb::log_upload_request::Kind::Backup)
+            .is_none());
+        assert_eq!(c.pending_count(), 1);
+    }
+
+    /// Pre-T-P22 gateway (no echo): positional by kind, as before.
+    #[test]
+    fn empty_client_ref_falls_back_to_kind() {
+        let c = UploadCoordinator::new();
+        c.register(upload(pb::log_upload_request::Kind::LogBundle, "bundle"));
+        c.register(upload(pb::log_upload_request::Kind::Backup, "backup"));
+        let got = c
+            .take_for("", pb::log_upload_request::Kind::Backup)
+            .unwrap();
+        assert_eq!(got.path, PathBuf::from("backup"));
     }
 }
