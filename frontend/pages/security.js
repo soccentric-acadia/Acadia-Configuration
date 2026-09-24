@@ -3,6 +3,7 @@
 // (read-only).
 
 import { el } from '../core/dom.js';
+import { Store } from '../core/store.js';
 import { Card } from '../components/card.js';
 import { Field } from '../components/field.js';
 import { Toggle } from '../components/toggle.js';
@@ -35,24 +36,28 @@ export async function render(api, store) {
   const wgEn = Toggle({ label: 'WireGuard enabled', checked: sec.wireguard && sec.wireguard.enabled });
   const wgPort = Field({ label: 'WireGuard port', type: 'number', value: sec.wireguard && sec.wireguard.port });
 
+  // T-P00e: WireGuard is deferred on this product — its controls are hidden
+  // and the stored value is saved back unchanged.
+  const wgDeferred = Store.isDeferred('wireguard');
   const configCard = Card({
     title: 'Security config',
-    subtitle: 'Session policy, plain HTTP access, and WireGuard settings.',
+    subtitle: wgDeferred ? 'Session policy and plain HTTP access.' : 'Session policy, plain HTTP access, and WireGuard settings.',
     footer: ActionList(
-      ActionRow('Apply WireGuard', 'Apply the configured WireGuard interface and peers to the device.', Button({ variant: 'outline', onClick: async () => { await api.post('/api/v1/security/apply', {}); store.toast('WireGuard applied', 'success'); } }, 'Apply')),
-      ActionRow('Save security settings', 'Store session, HTTP, WireGuard, and certificate settings.', Button({
+      wgDeferred ? null : ActionRow('Apply WireGuard', 'Apply the configured WireGuard interface and peers to the device.', Button({ variant: 'outline', onClick: async () => { await api.post('/api/v1/security/apply', {}); store.toast('WireGuard applied', 'success'); } }, 'Apply')),
+      ActionRow('Save security settings', wgDeferred ? 'Store session, HTTP, and certificate settings.' : 'Store session, HTTP, WireGuard, and certificate settings.', Button({
         onClick: async () => {
           await api.put('/api/v1/security', {
             session_idle_timeout_secs: Number(idle.get()) || 0,
             allow_plain_http: plainHttp.get(),
-            wireguard: { enabled: wgEn.get(), port: Number(wgPort.get()) || 0, peers: (sec.wireguard && sec.wireguard.peers) || [] },
+            wireguard: wgDeferred ? (sec.wireguard || {}) : { enabled: wgEn.get(), port: Number(wgPort.get()) || 0, peers: (sec.wireguard && sec.wireguard.peers) || [] },
             certificates: sec.certificates || [],
           });
           store.toast('Security config saved', 'success');
         },
       }, 'Save'))),
-  }, idle.wrap, plainHttp.wrap, el('div', { class: 'toggle-stack' }, wgEn.wrap), wgPort.wrap,
-    el('div', { class: 'row' }, el('span', { class: 'muted text-sm' }, 'WireGuard public key:'),
+  }, idle.wrap, plainHttp.wrap,
+    wgDeferred ? null : el('div', { class: 'toggle-stack' }, wgEn.wrap), wgDeferred ? null : wgPort.wrap,
+    wgDeferred ? null : el('div', { class: 'row' }, el('span', { class: 'muted text-sm' }, 'WireGuard public key:'),
       wg.public_key ? el('code', { class: 'mono' }, wg.public_key) : Badge(wg.has_private_key ? 'key present, no peer' : 'not generated yet', 'neutral')));
 
   // ---------- TLS identity: customer cert/key upload + CSR generator ----------
@@ -135,7 +140,7 @@ export async function render(api, store) {
       el('div', { class: 'row text-sm' }, el('strong', {}, p.interface + ':'), (p.open_services || []).join(', ') || 'none'))));
 
   return el('div', {},
-    el('div', { class: 'page-header' }, el('h1', {}, 'Security'), el('p', {}, 'Sessions, WireGuard, TLS, and exposure/trust posture.')),
+    el('div', { class: 'page-header' }, el('h1', {}, 'Security'), el('p', {}, wgDeferred ? 'Sessions, TLS, and exposure/trust posture.' : 'Sessions, WireGuard, TLS, and exposure/trust posture.')),
     configCard,
     el('div', { class: 'card-grid' }, tlsCard, csrCard, certsCard, exposureCard));
 }

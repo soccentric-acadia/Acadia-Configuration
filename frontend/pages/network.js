@@ -3,6 +3,7 @@
 // window or the engine bridge auto-rolls-back (see core/store.js).
 
 import { el } from '../core/dom.js';
+import { Store } from '../core/store.js';
 import { Card } from '../components/card.js';
 import { Field } from '../components/field.js';
 import { Toggle } from '../components/toggle.js';
@@ -117,6 +118,7 @@ export async function renderNetworkPage(api, store, mode = 'all') {
 
   const dns = Field({ label: 'DNS servers (comma)', value: (config.dns_servers || []).join(', ') });
   const confirmWindow = Field({ label: 'Confirm window (s)', type: 'number', value: config.confirm_window_secs || 90 });
+  const apDeferred = Store.isDeferred('ap_mode'); // T-P00e
   const apEn = Toggle({ label: 'AP provisioning mode', checked: config.ap_mode && config.ap_mode.enabled });
   const apTrigger = Field({
     label: 'Provisioning trigger', type: 'select',
@@ -135,7 +137,8 @@ export async function renderNetworkPage(api, store, mode = 'all') {
       dns_servers: dns.get().split(',').map(s => s.trim()).filter(Boolean),
       firewall: config.firewall || { default_open: [] },
       confirm_window_secs: Number(confirmWindow.get()) || 90,
-      ap_mode: {
+      // T-P00e: a deferred AP mode keeps whatever the store holds.
+      ap_mode: apDeferred ? (config.ap_mode || {}) : {
         enabled: apEn.get(),
         trigger: apTrigger.get() || 'no-config',
         ssid: apSsid.get(), passphrase: apPass.get(),
@@ -181,7 +184,7 @@ export async function renderNetworkPage(api, store, mode = 'all') {
 
   const showWired = mode === 'all' || mode === 'wired';
   const showWireless = mode === 'all' || mode === 'wireless';
-  const showFiveG = mode === 'all' || mode === '5g';
+  const showFiveG = (mode === 'all' || mode === '5g') && !Store.isDeferred('cellular'); // T-P00e
   const title = mode === 'wired' ? 'Wired networking' : mode === 'wireless' ? 'Wireless networking' : mode === '5g' ? '5G networking' : 'Networking';
   const content = [
     showWired ? el('section', { class: 'network-wired-section' },
@@ -193,7 +196,9 @@ export async function renderNetworkPage(api, store, mode = 'all') {
       el('p', { class: 'muted' }, 'Wi-Fi connections and wireless interfaces.'),
       wirelessIfaceHost, wirelessCard) : null,
     showFiveG ? fiveGCard : null,
-    showWireless ? Card({ title: 'DNS + AP mode', subtitle: 'Set name servers and the fallback access-point provisioning behavior.' }, dns.wrap, confirmWindow.wrap, el('div', { class: 'toggle-stack' }, apEn.wrap), apTrigger.wrap, apSsid.wrap, apPass.wrap) : null,
+    showWireless ? (apDeferred
+      ? Card({ title: 'DNS', subtitle: 'Set name servers and the network confirm window.' }, dns.wrap, confirmWindow.wrap)
+      : Card({ title: 'DNS + AP mode', subtitle: 'Set name servers and the fallback access-point provisioning behavior.' }, dns.wrap, confirmWindow.wrap, el('div', { class: 'toggle-stack' }, apEn.wrap), apTrigger.wrap, apSsid.wrap, apPass.wrap)) : null,
     Card({ title: 'Network actions', subtitle: 'Applying network settings is provisional until the new connection is confirmed.' },
       ActionList(
         ActionRow('Save and apply', 'Write the edited settings and apply them. The connection may move to a new address.', Button({ onClick: apply }, 'Apply settings')),

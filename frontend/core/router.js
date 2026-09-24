@@ -11,7 +11,7 @@ import { startProgress, finishProgress } from '../components/progress-bar.js';
 import { choiceDialog } from '../components/modal.js';
 import { PageSkeleton } from '../components/skeleton.js';
 import { EmptyState } from '../components/empty-state.js';
-import { NAV, ROUTE_IDS, routeMeta } from '../pages/registry.js';
+import { DEFERRED_PAGES, NAV, ROUTE_IDS, routeMeta } from '../pages/registry.js';
 
 let sidebarApi = null;
 let topbarApi = null;
@@ -39,6 +39,7 @@ export function initRouter({ sidebar, topbar }) {
 function parse() {
   const h = location.hash.replace(/^#\/?/, '').split('/')[0];
   if (!h) return 'overview';
+  if (DEFERRED_PAGES[h] && Store.isDeferred(DEFERRED_PAGES[h])) return null; // T-P00e
   return ROUTE_IDS.includes(h) ? h : null;
 }
 

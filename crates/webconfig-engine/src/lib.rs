@@ -18,6 +18,7 @@ pub mod applier;
 pub mod appliers;
 pub mod audit;
 pub mod backup;
+pub mod deferred;
 pub mod leds;
 pub mod manifest;
 pub mod monitoring;

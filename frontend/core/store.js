@@ -12,6 +12,10 @@ const cleanups = [];
 export const Store = {
   role: null,
   username: null,
+  // T-P00e: board-manifest features deferred from this release (hidden in
+  // the UI; the daemon refuses to enable them). Set after login.
+  deferred: [],
+  isDeferred(feature) { return this.deferred.includes(feature); },
   pendingConfirm: null,
   _onSessionChange: null,
 

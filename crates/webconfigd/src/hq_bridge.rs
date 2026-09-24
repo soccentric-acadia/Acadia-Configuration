@@ -738,6 +738,9 @@ impl DeviceOps {
                 ),
             );
         }
+        if let Err(e) = self.engine.check_deferred(&file.config) {
+            return CommandOutcome::failure("FAILED_PRECONDITION", e.to_string());
+        }
         match self.engine.store.commit(&file) {
             Ok(()) => CommandOutcome::ok_json("OK", r#"{"restored": true}"#),
             Err(e) => CommandOutcome::failure("INTERNAL", e.to_string()),

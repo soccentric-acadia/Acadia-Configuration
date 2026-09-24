@@ -3,6 +3,7 @@
 
 import { api, setCsrf } from './api.js';
 import { Store } from './store.js';
+import { DEFERRED_PAGES } from '../pages/registry.js';
 
 const REMEMBERED_USERNAME_KEY = 'webconfig.remembered-username';
 
@@ -48,7 +49,14 @@ export function createAuthController({ authScreen, appShell, topbar, onRender })
         try {
             const manifest = await api.get('/api/v1/manifest');
             if (manifest && manifest.platform) topbar.setBadge(manifest.platform);
-        } catch (_) { /* badge is cosmetic */ }
+            // T-P00e: hide pages of features deferred from this release.
+            Store.deferred = (manifest && manifest.deferred_features) || [];
+            for (const [page, feature] of Object.entries(DEFERRED_PAGES)) {
+                if (!Store.isDeferred(feature)) continue;
+                const link = document.querySelector(`[data-route="${page}"]`);
+                if (link) (link.closest('li') || link).hidden = true;
+            }
+        } catch (_) { /* badge is cosmetic; deferred pages stay refused server-side */ }
         onRender();
     }
 

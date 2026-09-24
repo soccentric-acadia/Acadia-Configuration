@@ -677,6 +677,7 @@ pub async fn restore(
             webconfig_engine::CONFIG_SCHEMA_VERSION
         )));
     }
+    app.engine.check_deferred(&file.config)?;
     app.engine.store.commit(&file)?;
     audit(&app, &username(&session).await, "updates.restore", None);
     Ok(Json(serde_json::json!({ "restored": true })))

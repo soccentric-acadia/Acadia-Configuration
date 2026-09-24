@@ -52,7 +52,8 @@ pub(crate) async fn build(sysroot: Sysroot) -> Application {
         sysroot.clone(),
         &manifest.peripherals,
         &manifest.wifi_radio,
-    );
+    )
+    .with_deferred(manifest.deferred_features.clone());
     let database = webconfig_dir.join("config.db");
     let audit = Arc::new(AuditLog::new(database.clone(), 256 * 1024));
     let alert_engine = Arc::new(tokio::sync::Mutex::new(AlertEngine::new()));

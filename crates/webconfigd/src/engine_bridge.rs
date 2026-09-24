@@ -90,6 +90,8 @@ pub struct EngineBridge {
     pub sysroot: Arc<Sysroot>,
     appliers: Arc<Vec<Box<dyn Applier>>>,
     pub confirm: Arc<ConfirmManager>,
+    /// T-P00e: manifest `deferred_features`, enforced on every update.
+    deferred: Arc<Vec<String>>,
 }
 
 impl EngineBridge {
@@ -107,7 +109,21 @@ impl EngineBridge {
             sysroot: Arc::new(sysroot),
             appliers: Arc::new(appliers::all(manifest_peripherals, wifi_radio)),
             confirm: Arc::new(ConfirmManager::new()),
+            deferred: Arc::new(Vec::new()),
         }
+    }
+
+    /// T-P00e: refuse a whole-document commit (restore) that enables a
+    /// deferred feature.
+    pub fn check_deferred(&self, config: &Config) -> ApiResult<()> {
+        webconfig_engine::deferred::check(config, &self.deferred)
+            .map_err(|e| webconfig_engine::StoreError::Validation(e).into())
+    }
+
+    /// Enforce the board manifest's deferred features on every write.
+    pub fn with_deferred(mut self, deferred: Vec<String>) -> Self {
+        self.deferred = Arc::new(deferred);
+        self
     }
 
     /// Load the current config tree (cheap; runs on the async task).
@@ -121,7 +137,14 @@ impl EngineBridge {
         F: FnOnce(&mut Config) -> Result<(), webconfig_engine::StoreError> + Send + 'static,
         Config: Send,
     {
-        let file = self.store.update(f)?;
+        // T-P00e: a write that would enable a deferred feature is refused
+        // before it is persisted (local API and HQ writes alike).
+        let deferred = self.deferred.clone();
+        let file = self.store.update(move |c| {
+            f(c)?;
+            webconfig_engine::deferred::check(c, &deferred)
+                .map_err(webconfig_engine::StoreError::Validation)
+        })?;
         Ok(file.config)
     }
 

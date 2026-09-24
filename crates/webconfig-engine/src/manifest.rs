@@ -154,6 +154,11 @@ pub struct BoardManifest {
     /// operator can override or disable a default by id.
     #[serde(default)]
     pub default_alert_rules: Vec<crate::store::alerts::AlertRule>,
+    /// Features this product defers from its release (T-P00e): hidden in the
+    /// UI and refused by every configuration write (see `deferred`).
+    /// Known ids: ptp, ap_mode, wireguard, cellular.
+    #[serde(default)]
+    pub deferred_features: Vec<String>,
     /// AP-provisioning-mode radio parameters (spec §4.9). Absent in existing
     /// manifests → falls back to `WifiRadio::default()` (wlan0/g/7, the
     /// previous hardcoded behavior).

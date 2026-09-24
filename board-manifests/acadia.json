@@ -235,6 +235,12 @@
       ]
     }
   ],
+  "deferred_features": [
+    "ptp",
+    "ap_mode",
+    "wireguard",
+    "cellular"
+  ],
   "meta": {
     "uart_allocation_authority": "Acadia-Hardware doc/uart-allocation.md (pin-map rev-c, T-P15)"
   }

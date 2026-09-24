@@ -6,6 +6,10 @@
 // `key` is the second letter of the `g <key>` keyboard-shortcut chord
 // (core/shortcuts.js) — picked explicitly so pages sharing a first letter
 // (System/Services/Security) don't collide.
+// T-P00e: pages that exist only for a deferred feature (board manifest
+// `deferred_features`) — hidden from the sidebar and unreachable by URL.
+export const DEFERRED_PAGES = { ptp: 'ptp', '5g': 'cellular' };
+
 export const NAV = [
   // Dashboard: understand the current state before changing anything.
   { id: 'overview', label: 'Overview', icon: 'home', category: 'Dashboard', key: 'o', loader: () => import('./overview.js') },
