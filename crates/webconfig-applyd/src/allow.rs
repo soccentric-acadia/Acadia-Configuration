@@ -149,6 +149,9 @@ pub const WRITE_FILES: &[&str] = &[
     "/etc/hostname",
     // appliers/camera.rs (T-P28): ENABLED / CAMERA_DEVICE of the capture service
     "/etc/acadia/camera-capture.conf",
+    // api/provisioning.rs (P-A10): acadia-client's IV&V server config + CA
+    "/var/lib/acadia/client.conf",
+    "/var/lib/acadia/ivv-ca.pem",
 ];
 
 /// LED attributes the board-LED policy writes (T-P28, engine leds.rs).
@@ -186,7 +189,12 @@ fn led_path_allowed(p: &str) -> bool {
 
 /// User:group pairs a write/mkdir may be chown'ed to (T-P11: the operator's
 /// authorized_keys must be operator-owned). Root keeps root ownership.
-pub const OWNER_ALLOWED: &[&str] = &["operator:operator", "root:root", "webconfig:webconfig"];
+pub const OWNER_ALLOWED: &[&str] = &[
+    "operator:operator",
+    "root:root",
+    "webconfig:webconfig",
+    "acadia:acadia", // api/provisioning.rs: acadia-client's config (P-A10)
+];
 
 /// Whether a write/mkdir may carry this owner.
 pub fn owner_allowed(owner: &str) -> bool {

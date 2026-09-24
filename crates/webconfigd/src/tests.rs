@@ -3288,3 +3288,100 @@ async fn tp24_status_snapshot_reports_services_and_versions() {
     );
     assert!(status.collected_at_unix_ms > 0);
 }
+
+// ── P-A10 / OS-071: first-use provisioning ─────────────────────────────────
+#[tokio::test]
+async fn provisioning_hq_trust_and_ivv_client_via_http() {
+    let (app, dir) = build_app().await;
+    let (cookie, csrf) = boot_admin(&app).await;
+    let wc = dir.path().join("data/webconfig");
+
+    let (st, _, body) = send(
+        &app,
+        "GET",
+        "/api/v1/provisioning",
+        Some(&cookie),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["hq_config_key"]["provisioned"], false);
+
+    // Rejected material writes nothing.
+    for bad in [
+        serde_json::json!({}),
+        serde_json::json!({"hq_ca_pem": "not a cert"}),
+        serde_json::json!({"hq_ca_pem": "-----BEGIN CERTIFICATE-----\nPRIVATE KEY\n-----END CERTIFICATE-----"}),
+        serde_json::json!({"hq_config_pubkey_pem": "AAAA"}),
+    ] {
+        let (st, _, _) = send(
+            &app,
+            "PUT",
+            "/api/v1/provisioning/hq-trust",
+            Some(&cookie),
+            Some(&csrf),
+            Some(&bad.to_string()),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    assert!(!wc.join("hq-config-pub.pem").exists());
+
+    let raw_key = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [7u8; 32]);
+    let ca = "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ\n-----END CERTIFICATE-----";
+    let (st, _, body) = send(
+        &app,
+        "PUT",
+        "/api/v1/provisioning/hq-trust",
+        Some(&cookie),
+        Some(&csrf),
+        Some(&serde_json::json!({"hq_ca_pem": ca, "hq_config_pubkey_pem": raw_key}).to_string()),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["hq_ca"]["source"], "device");
+    assert_eq!(v["hq_config_key"]["provisioned"], true);
+    assert!(wc.join("hq-ca.pem").is_file());
+    assert!(wc.join("hq-config-pub.pem").is_file());
+
+    // IV&V client: validated, rendered, mirrored without the token.
+    let (st, _, _) = send(
+        &app,
+        "PUT",
+        "/api/v1/provisioning/ivv-client",
+        Some(&cookie),
+        Some(&csrf),
+        Some(r#"{"server_address":"x\"\ny = 1"}"#),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, _, body) = send(
+        &app,
+        "PUT",
+        "/api/v1/provisioning/ivv-client",
+        Some(&cookie),
+        Some(&csrf),
+        Some(r#"{"server_address":"ivv.lab","server_port":50061,"server_stream_token":"s3cret"}"#),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(!body.contains("s3cret"));
+    let conf = std::fs::read_to_string(dir.path().join("var/lib/acadia/client.conf")).unwrap();
+    assert!(conf.contains("server_address = \"ivv.lab\""));
+    assert!(conf.contains("server_port = 50061"));
+    let (_, _, body) = send(
+        &app,
+        "GET",
+        "/api/v1/provisioning",
+        Some(&cookie),
+        None,
+        None,
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["ivv_client"]["server_address"], "ivv.lab");
+    assert_eq!(v["ivv_client"]["stream_token_set"], true);
+}

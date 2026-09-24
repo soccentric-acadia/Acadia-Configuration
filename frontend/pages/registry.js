@@ -34,6 +34,7 @@ export const NAV = [
   { id: '5g', label: '5G', icon: 'signal', category: 'Connectivity', key: '5', loader: () => import('./fiveg.js') },
   { id: 'services', label: 'Services', icon: 'services', category: 'Connectivity', key: 'v', loader: () => import('./services.js') },
   { id: 'cloud', label: 'Cloud', icon: 'cloud', category: 'Connectivity', key: 'c', loader: () => import('./cloud.js') },
+  { id: 'provisioning', label: 'Provisioning', icon: 'lock', category: 'Connectivity', key: '3', loader: () => import('./provisioning.js'), adminOnly: true },
 
   // Maintenance: updates and configuration recovery.
   { id: 'updates', label: 'Updates', icon: 'updates', category: 'Maintenance', key: 'u', loader: () => import('./updates.js') },

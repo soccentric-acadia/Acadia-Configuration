@@ -26,8 +26,8 @@ const INSTALL_LIMIT: usize = 4 * 1024; // {"bundle_path": "..."} — a path stri
 const UPLOAD_BUNDLE_LIMIT: usize = 512 * 1024 * 1024;
 
 use crate::api::{
-    alerts, device, io, logs, meta, monitoring, network, operations, pairing, security, services,
-    system, updates,
+    alerts, device, io, logs, meta, monitoring, network, operations, pairing, provisioning,
+    security, services, system, updates,
 };
 use crate::auth;
 use crate::csrf;
@@ -90,6 +90,13 @@ pub fn build_router(state: AppState, static_dir: std::path::PathBuf) -> Router {
         .route("/network/confirm", post(network::confirm))
         .route("/network/rollback", post(network::rollback))
         .route("/network/scan", get(network::scan))
+        // P-A10 first-use provisioning (HQ trust material, IV&V client).
+        .route("/provisioning", get(provisioning::get))
+        .route("/provisioning/hq-trust", put(provisioning::put_hq_trust))
+        .route(
+            "/provisioning/ivv-client",
+            put(provisioning::put_ivv_client),
+        )
         .route("/pairing", get(pairing::get))
         .route("/pairing/provision", post(pairing::provision))
         .route("/pairing/heartbeat", post(pairing::heartbeat))

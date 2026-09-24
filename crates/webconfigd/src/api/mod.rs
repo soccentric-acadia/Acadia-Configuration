@@ -14,6 +14,7 @@ pub mod monitoring;
 pub mod network;
 pub mod operations;
 pub mod pairing;
+pub mod provisioning;
 pub mod security;
 pub mod services;
 pub mod system;

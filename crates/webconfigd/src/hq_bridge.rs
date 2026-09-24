@@ -59,13 +59,14 @@ pub const SERVICE_ACTIONS: &[&str] = &["start", "stop", "restart", "enable", "di
 /// The HQ configuration-signing public key sources, in order (T-P13, F09):
 /// 1. `WEBCONFIG_HQ_CONFIG_PUBKEY` — PEM ("-----BEGIN PUBLIC KEY-----", RFC
 ///    8410 Ed25519 SubjectPublicKeyInfo) or raw base64 of the 32-byte key,
-/// 2. `/etc/acadia/hq-config-pub.pem` — provisioned with the fleet key.
+/// 2. `<data>/webconfig/hq-config-pub.pem` — first-use provisioning
+///    (P-A10, `PUT /provisioning/hq-trust`), persistent across OTA,
+/// 3. `/etc/acadia/hq-config-pub.pem` — a fleet key baked into the image.
 pub const HQ_CONFIG_PUBKEY_ENV: &str = "WEBCONFIG_HQ_CONFIG_PUBKEY";
-pub const HQ_CONFIG_PUBKEY_PATH: &str = "/etc/acadia/hq-config-pub.pem";
 
 /// Extract the raw 32-byte Ed25519 verification key from PEM (RFC 8410 SPKI
 /// DER: fixed 12-byte header + 32-byte key) or raw base64.
-fn ed25519_pubkey_bytes(input: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn ed25519_pubkey_bytes(input: &str) -> Result<Vec<u8>, String> {
     let trimmed = input.trim();
     if trimmed.starts_with("-----BEGIN") {
         let b64: String = trimmed
@@ -101,9 +102,14 @@ fn hq_config_pubkey() -> Option<Vec<u8>> {
             return ed25519_pubkey_bytes(&from_env).ok();
         }
     }
-    std::fs::read_to_string(HQ_CONFIG_PUBKEY_PATH)
-        .ok()
-        .and_then(|pem| ed25519_pubkey_bytes(&pem).ok())
+    let dir = webconfig_engine::Sysroot::new().webconfig_dir();
+    crate::api::provisioning::resolve(
+        &dir,
+        crate::api::provisioning::HQ_CONFIG_PUBKEY_FILE,
+        crate::api::provisioning::IMAGE_HQ_CONFIG_PUBKEY,
+    )
+    .and_then(|path| std::fs::read_to_string(path).ok())
+    .and_then(|pem| ed25519_pubkey_bytes(&pem).ok())
 }
 
 /// The exact bytes HQ signs and the device verifies (T-P13, F09): the
@@ -125,7 +131,7 @@ fn signed_document(envelope: &serde_json::Value) -> Result<Vec<u8>, String> {
 /// Envelope validation for `configuration.write` (task 009, H5; T-P13, F09).
 ///
 /// Verification is MANDATORY: the HQ Ed25519 public key must be provisioned
-/// (env or /etc/acadia/hq-config-pub.pem) and the signature must verify over
+/// (env, first-use provisioning or the image) and the signature must verify over
 /// the canonical transport payload. Without a provisioned key the write is
 /// rejected outright — the old length-check-only transitional policy is gone.
 pub fn validate_write_envelope(envelope: &serde_json::Value) -> Result<(), String> {
@@ -162,7 +168,8 @@ pub fn validate_write_envelope(envelope: &serde_json::Value) -> Result<(), Strin
         return Err("signature must decode to 64 bytes".into());
     }
     let key = hq_config_pubkey().ok_or_else(|| {
-        "FAILED_PRECONDITION: HQ verification key not provisioned — set          WEBCONFIG_HQ_CONFIG_PUBKEY or install /etc/acadia/hq-config-pub.pem"
+        "FAILED_PRECONDITION: HQ verification key not provisioned — provision it \
+         (PUT /api/v1/provisioning/hq-trust) or bake /etc/acadia/hq-config-pub.pem into the image"
             .to_string()
     })?;
     let verifier = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &key);

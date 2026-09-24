@@ -520,7 +520,7 @@ impl GrpcConnector {
             // Pinned HQ CA first (provisioned, P-A10); the native root store
             // (tls-roots feature) covers publicly-trusted gateway certs.
             let mut tls = tonic::transport::ClientTlsConfig::new().with_enabled_roots();
-            if let Ok(ca) = std::fs::read(HQ_CA_PATH) {
+            if let Some(ca) = hq_ca_pem() {
                 tls = tls.ca_certificate(tonic::transport::Certificate::from_pem(ca));
             }
             // Optional mTLS identity (factory-issued client certificate).
@@ -540,8 +540,19 @@ impl GrpcConnector {
     }
 }
 
-/// Pinned HQ CA for AgentLink TLS verification (provisioned, P-A10).
-const HQ_CA_PATH: &str = "/etc/acadia/hq-ca.pem";
+/// Pinned HQ CA for AgentLink TLS verification (P-A10): first-use
+/// provisioning writes it to the persistent WebConfig store
+/// (`$WEBCONFIG_DATA_DIR/webconfig/hq-ca.pem`, default `/pst/webconfig/`);
+/// `/etc/acadia/hq-ca.pem` is an optional fleet CA baked into the image.
+const HQ_CA_IMAGE_PATH: &str = "/etc/acadia/hq-ca.pem";
+
+fn hq_ca_pem() -> Option<Vec<u8>> {
+    let data = std::env::var("WEBCONFIG_DATA_DIR").unwrap_or_else(|_| "/pst".into());
+    let provisioned = std::path::Path::new(&data).join("webconfig/hq-ca.pem");
+    std::fs::read(provisioned)
+        .or_else(|_| std::fs::read(HQ_CA_IMAGE_PATH))
+        .ok()
+}
 /// Optional mTLS device identity for AgentLink (factory-issued, T-P12).
 const HQ_CLIENT_CERT_PATH: &str = "/pst/webconfig/hq-client-cert.pem";
 const HQ_CLIENT_KEY_PATH: &str = "/pst/webconfig/hq-client-key.pem";
