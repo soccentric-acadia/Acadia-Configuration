@@ -43,6 +43,29 @@ export function render(api, store) {
         },
     }, 'Factory reset');
 
+    // T-P33 (C07): the RMA wipe — everything customer- or site-specific,
+    // carried out at the next boot before any service starts.
+    const fullWipe = Button({
+        variant: 'destructive-outline',
+        onClick: async () => {
+            if (!await confirmDialog({
+                title: 'Full wipe (RMA)?',
+                description: 'Erases settings, user accounts, HQ pairing and credentials, SSH keys, '
+                    + 'backups, logs and all stored data. Only the factory identity survives: the device '
+                    + 'comes back unclaimed and needs the claim code printed on its label.',
+                confirmLabel: 'Continue',
+                variant: 'destructive',
+            })) return;
+            const typed = await promptDialog({ title: 'Type WIPE to confirm', label: 'Confirmation phrase' });
+            if (typed !== 'WIPE') {
+                store.toast('Full wipe cancelled');
+                return;
+            }
+            await api.post('/api/v1/system/factory-reset', { confirm: 'WIPE', mode: 'full' });
+            store.showReconnect();
+        },
+    }, 'Full wipe');
+
     return el('div', { class: 'system-control-page' },
         el('div', { class: 'page-header' },
             el('h1', {}, 'System Control'),
@@ -52,6 +75,7 @@ export function render(api, store) {
             subtitle: 'These actions change persistent device state and may require a reconnect.',
         }, ActionList(
             ActionRow('System reset', 'Return configuration to default mode while preserving user accounts.', systemReset),
-            ActionRow('Factory reset', 'Erase configuration and user accounts. This cannot be undone.', factoryReset))),
+            ActionRow('Factory reset', 'Erase configuration and user accounts. This cannot be undone.', factoryReset),
+            ActionRow('Full wipe (RMA)', 'Erase everything except the factory identity, before returning or reassigning the device.', fullWipe))),
     );
 }

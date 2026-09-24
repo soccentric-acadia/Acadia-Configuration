@@ -1176,6 +1176,60 @@ async fn factory_reset_wipes_certs_and_alert_history() {
         .query_row("SELECT COUNT(*) FROM alert_history", [], |r| r.get(0))
         .unwrap();
     assert_eq!(count, 0);
+    // T-P33: the Instrumentation half runs at next boot.
+    let request: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(webconfig_dir.join("factory-wipe.request")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(request["level"], "settings");
+}
+
+#[tokio::test]
+async fn full_factory_wipe_requires_wipe_confirmation_and_requests_boot_wipe() {
+    // T-P33 (C07): the full (RMA) wipe is requested for the next boot —
+    // nothing is removed in-process — and needs its own typed confirmation.
+    let (app, dir) = build_app().await;
+    let (cookie, csrf) = boot_admin(&app).await;
+    let webconfig_dir = dir.path().join("data/webconfig");
+    let request = webconfig_dir.join("factory-wipe.request");
+
+    for body in [
+        r#"{"confirm":"RESET","mode":"full"}"#,
+        r#"{"confirm":"WIPE","mode":"settings"}"#,
+        r#"{"confirm":"WIPE","mode":"everything"}"#,
+    ] {
+        let (st, _, _) = send(
+            &app,
+            "POST",
+            "/api/v1/system/factory-reset",
+            Some(&cookie),
+            Some(&csrf),
+            Some(body),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        assert!(!request.exists(), "{body} must not request a wipe");
+    }
+
+    let (st, _, body) = send(
+        &app,
+        "POST",
+        "/api/v1/system/factory-reset",
+        Some(&cookie),
+        Some(&csrf),
+        Some(r#"{"confirm":"WIPE","mode":"full"}"#),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["factory_reset"], true);
+    assert_eq!(v["mode"], "full");
+    let req: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&request).unwrap()).unwrap();
+    assert_eq!(req["level"], "full");
+    assert_eq!(req["requested_by"], "admin");
+    // Accounts are still in place until the boot-time wipe runs.
+    assert!(webconfig_dir.join("config.db").exists());
 }
 
 #[tokio::test]
@@ -2863,7 +2917,8 @@ async fn first_boot_requires_claim_code_when_provisioned() {
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
 
-    // Correct code → admin created; the claim file is consumed (one-time use).
+    // Correct code → admin created. T-P33: the claim file stays — it gates
+    // first-boot again after a factory reset that removes every account.
     let (st, _, _) = send(
         &app,
         "POST",
@@ -2874,7 +2929,19 @@ async fn first_boot_requires_claim_code_when_provisioned() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
-    assert!(!claim_dir.join("claim-code").exists());
+    assert!(claim_dir.join("claim-code").exists());
+
+    // A second first-boot is refused once an account exists, code or not.
+    let (st, _, _) = send(
+        &app,
+        "POST",
+        "/api/v1/auth/first-boot",
+        None,
+        None,
+        Some(r#"{"username":"evil","password":"Kettle-Harbor-41","claim_code":"ABCD1234"}"#),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
 }
 
 // ── T-P10 (B06): per-IP login throttle ──────────────────────────────────────

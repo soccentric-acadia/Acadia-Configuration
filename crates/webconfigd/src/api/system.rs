@@ -298,13 +298,50 @@ pub async fn shutdown(
     Ok(Json(serde_json::json!({ "shutting_down": true })))
 }
 
-/// `POST /api/v1/system/factory-reset` — wipe data partition and reboot (spec
-/// §4.1). Requires typed confirmation ("RESET"); "settings only" vs
-/// "settings + user data" via the `mode` field.
+/// `POST /api/v1/system/factory-reset` — the local factory reset (spec §4.1,
+/// T-P33 contract, meta-acadia docs/factory-reset.md):
+///
+/// * `settings` (C06) — configuration back to image defaults, accounts kept;
+/// * `settings+users` — also removes every WebConfig account (first-boot
+///   reopens, gated by the label claim code);
+/// * `full` (C07 / RMA) — everything customer- or site-specific: the whole
+///   persistent store except the factory identity, home directories (SSH
+///   keys, Acadia-Client/HQ credentials), OTA staging and the journal.
+///
+/// WebConfig resets its own store in-process for the two settings modes,
+/// then every mode writes a boot-time request
+/// ([`FACTORY_WIPE_REQUEST`]) that `acadia-factory-wipe.service` carries out
+/// before any service starts (Instrumentation config/state for the settings
+/// modes, everything for `full`), and reboots. Typed confirmation: `RESET`
+/// for the settings modes, `WIPE` for `full`.
 #[derive(Deserialize)]
 pub struct FactoryResetRequest {
     pub confirm: String,
-    pub mode: String, // "settings" | "settings+users"
+    pub mode: String, // "settings" | "settings+users" | "full"
+}
+
+/// The boot-time reset request consumed by `acadia-factory-wipe.service`
+/// (meta-acadia, T-P33), relative to the WebConfig data dir (`/pst/webconfig`).
+pub const FACTORY_WIPE_REQUEST: &str = "factory-wipe.request";
+
+/// Write the boot-time reset request for `level` ("settings" | "full").
+pub(crate) fn request_boot_wipe(
+    sysroot: &webconfig_engine::Sysroot,
+    level: &str,
+    requested_by: &str,
+) -> Result<(), String> {
+    let dir = sysroot.webconfig_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let body = serde_json::json!({
+        "level": level,
+        "requested_by": requested_by,
+        "requested_at": crate::api::now_iso(),
+    });
+    let path = dir.join(FACTORY_WIPE_REQUEST);
+    let tmp = dir.join(format!("{FACTORY_WIPE_REQUEST}.tmp"));
+    std::fs::write(&tmp, format!("{body}\n"))
+        .and_then(|_| std::fs::rename(&tmp, &path))
+        .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 pub async fn factory_reset(
@@ -314,17 +351,32 @@ pub async fn factory_reset(
     Json(req): Json<FactoryResetRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     role.require_admin("system.factory-reset")?;
-    if req.confirm != "RESET" {
-        return Err(ApiError::BadRequest("type RESET to confirm".into()));
-    }
-    if req.mode != "settings" && req.mode != "settings+users" {
-        return Err(ApiError::BadRequest(
-            "mode must be settings|settings+users".into(),
-        ));
+    let expected_confirm = match req.mode.as_str() {
+        "settings" | "settings+users" => "RESET",
+        "full" => "WIPE",
+        _ => {
+            return Err(ApiError::BadRequest(
+                "mode must be settings|settings+users|full".into(),
+            ))
+        }
+    };
+    if req.confirm != expected_confirm {
+        return Err(ApiError::BadRequest(format!(
+            "type {expected_confirm} to confirm"
+        )));
     }
     let user = username(&session).await;
     audit(&app, &user, "system.factory-reset", Some(req.mode.clone()));
-    let failures = factory_reset_core(&app.engine.sysroot, &req.mode);
+    let failures = if req.mode == "full" {
+        // Nothing is removed in-process: the boot-time wipe takes the whole
+        // store (this daemon's included) before anything reopens it.
+        request_boot_wipe(&app.engine.sysroot, "full", &user)
+            .err()
+            .into_iter()
+            .collect()
+    } else {
+        factory_reset_core(&app.engine.sysroot, &req.mode)
+    };
 
     // A partial failure means the device is in an unknown, possibly
     // inconsistent state — rebooting it now would present that as a clean
@@ -405,6 +457,15 @@ pub(crate) fn factory_reset_core(sysroot: &webconfig_engine::Sysroot, mode: &str
                 }
             }
             remove_file_best_effort(&dir.join("users.json"), &mut failures);
+        }
+    }
+    // T-P33: the Instrumentation config/state half of a settings reset runs
+    // at next boot, before istate starts (acadia-factory-wipe.service). Only
+    // requested after a clean in-process wipe — a partial failure skips the
+    // reboot, and a stale request must not fire on some later boot.
+    if failures.is_empty() {
+        if let Err(e) = request_boot_wipe(sysroot, "settings", "factory-reset") {
+            failures.push(e);
         }
     }
     failures

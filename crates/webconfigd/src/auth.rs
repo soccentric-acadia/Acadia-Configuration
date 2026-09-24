@@ -416,8 +416,11 @@ pub async fn first_boot(
     }
 
     // T-P10 (P-A03): the first on the network does NOT become admin — the
-    // claim code from the factory label does. One-time use: consumed here so
-    // a code can never re-claim a device later.
+    // claim code from the factory label does. T-P33: the code is NOT deleted
+    // on use. It is only ever checked while the device has no accounts
+    // (first-boot), which after a settings+users or full factory reset is
+    // exactly when the label holder must be able to re-claim it; deleting
+    // it left a reset device claimable by anyone on the network.
     let expected = provisioned_claim_code(&app);
     match expected {
         Some(expected) => {
@@ -436,7 +439,6 @@ pub async fn first_boot(
                     "claim-code mismatch — use the code printed on the device label".into(),
                 ));
             }
-            let _ = std::fs::remove_file(claim_code_path(&app.engine.sysroot));
         }
         None => {
             app.audit
