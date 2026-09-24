@@ -100,6 +100,14 @@ impl IstateCommandHandler {
         if command.command_id.is_empty() {
             return Err("INVALID_ARGUMENT: command_id is required".into());
         }
+        // A typed payload wins over the operation name: the HQ gateway sends
+        // BOTH (operation="apply_update" + kind=ApplyUpdate, likewise backup/
+        // restore/factory_reset). Checking `operation` first relayed these
+        // to istate as spoke ops, where they failed — HQ backup, restore,
+        // factory reset and apply_update never ran on a device.
+        if command.kind.is_some() {
+            return Self::normalize_typed(command);
+        }
         if !command.operation.is_empty() {
             if command.operation == "configuration.read"
                 || command.operation == "configuration.write"
@@ -154,6 +162,15 @@ impl IstateCommandHandler {
             if command.daemon.is_empty() {
                 return Err("INVALID_ARGUMENT: daemon is required for spoke operations".into());
             }
+            // `configuration` is webconfigd's own pseudo-daemon: an unknown
+            // verb there must fail here, not be relayed to istate (which has
+            // no such spoke and answers with a misleading transport error).
+            if command.daemon == "configuration" {
+                return Err(format!(
+                    "UNIMPLEMENTED: unknown configuration operation {:?}",
+                    command.operation
+                ));
+            }
             return Ok(Action::Spoke {
                 daemon: command.daemon.clone(),
                 operation: command.operation.clone(),
@@ -165,7 +182,11 @@ impl IstateCommandHandler {
             });
         }
 
-        // Typed legacy commands (normalized fields absent).
+        Self::normalize_typed(command)
+    }
+
+    /// Typed commands (`kind` set): backup, restore, factory reset, update.
+    fn normalize_typed(command: &pb::Command) -> Result<Action, String> {
         let args = match command.kind.as_ref() {
             Some(pb::command::Kind::TakeBackupNow(_)) => LocalOp::BackupNow,
             Some(pb::command::Kind::Restore(value)) => {
@@ -560,6 +581,43 @@ mod tests {
         let err = IstateCommandHandler::normalize(&command("users.create", r#"{"role":"admin"}"#))
             .unwrap_err();
         assert!(err.starts_with("INVALID_ARGUMENT"));
+    }
+
+    /// The HQ gateway sets `operation` AND the typed kind; the typed kind
+    /// must win (regression: these were relayed to istate and failed).
+    #[test]
+    fn typed_kind_wins_over_operation_name() {
+        let mut cmd = command("apply_update", "");
+        cmd.daemon = "configuration".into();
+        cmd.kind = Some(pb::command::Kind::ApplyUpdate(pb::ApplyUpdate {
+            artifact_id: "1.2.0".into(),
+            artifact_download_url: "http://x/y".into(),
+            checksum_sha256: "a".repeat(64),
+        }));
+        assert!(matches!(
+            IstateCommandHandler::normalize(&cmd).unwrap(),
+            Action::Local(LocalOp::ApplyUpdate(_))
+        ));
+        let mut backup = command("backup", "");
+        backup.daemon = "configuration".into();
+        backup.kind = Some(pb::command::Kind::TakeBackupNow(pb::TakeBackupNow {}));
+        assert!(matches!(
+            IstateCommandHandler::normalize(&backup).unwrap(),
+            Action::Local(LocalOp::BackupNow)
+        ));
+        let mut reset = command("factory_reset", "");
+        reset.daemon = "configuration".into();
+        reset.kind = Some(pb::command::Kind::FactoryReset(pb::FactoryReset {}));
+        let err = IstateCommandHandler::normalize(&reset).unwrap_err();
+        assert!(err.starts_with("PERMISSION_DENIED"), "{err}");
+    }
+
+    #[test]
+    fn unknown_configuration_verb_is_not_relayed() {
+        let mut cmd = command("frobnicate", "{}");
+        cmd.daemon = "configuration".into();
+        let err = IstateCommandHandler::normalize(&cmd).unwrap_err();
+        assert!(err.starts_with("UNIMPLEMENTED"), "{err}");
     }
 
     #[test]
