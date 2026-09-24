@@ -63,6 +63,16 @@ pub enum IstateError {
     Transport,
 }
 
+/// T-P24: what the heartbeat snapshot takes from istate.
+#[derive(Debug, Clone, Default)]
+pub struct IstateSnapshot {
+    pub serial: String,
+    pub hw_revision: String,
+    pub suite_version: String,
+    pub istate_state: String,
+    pub health_score: f64,
+}
+
 #[async_trait::async_trait]
 pub trait IstateClient: Send + Sync + 'static {
     async fn control(&self, request: ControlRequest) -> Result<ControlReply, IstateError>;
@@ -77,6 +87,11 @@ pub trait IstateClient: Send + Sync + 'static {
         Err(IstateError::Unavailable)
     }
     async fn status(&self) -> Result<serde_json::Value, IstateError> {
+        Err(IstateError::Unavailable)
+    }
+    /// T-P24: istate's system identity + health score for the HQ heartbeat
+    /// snapshot (`GetSystemInfo` + `GetHealthScore`).
+    async fn system_snapshot(&self) -> Result<IstateSnapshot, IstateError> {
         Err(IstateError::Unavailable)
     }
     /// Subscribe to istate's spooled northbound data (Instrumentation
@@ -206,6 +221,27 @@ impl IstateClient for GrpcIstateClient {
             code: reply.code,
             message: reply.message,
             json_payload: reply.json_payload,
+        })
+    }
+
+    async fn system_snapshot(&self) -> Result<IstateSnapshot, IstateError> {
+        let mut client = self.client.lock().await;
+        let info = client
+            .get_system_info(pb::istate::SystemInfoRequest {})
+            .await
+            .map_err(|_| IstateError::Transport)?
+            .into_inner();
+        let health = client
+            .get_health_score(pb::istate::HealthScoreRequest {})
+            .await
+            .map_err(|_| IstateError::Transport)?
+            .into_inner();
+        Ok(IstateSnapshot {
+            serial: info.serial,
+            hw_revision: info.hw_revision,
+            suite_version: info.suite_version,
+            istate_state: info.istate_state,
+            health_score: health.score,
         })
     }
 

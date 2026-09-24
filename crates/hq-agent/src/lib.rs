@@ -214,6 +214,25 @@ fn jittered(secs: u64) -> u64 {
     .max(if delta == 0 { 1 } else { delta })
 }
 
+/// T-P24: the latest device snapshot attached to every heartbeat. The
+/// embedding daemon refreshes it (webconfigd: every 30 s); `None` until the
+/// first snapshot, in which case heartbeats carry no status.
+fn device_status_slot() -> &'static Mutex<Option<pb::DeviceStatus>> {
+    static STATUS: OnceLock<Mutex<Option<pb::DeviceStatus>>> = OnceLock::new();
+    STATUS.get_or_init(|| Mutex::new(None))
+}
+
+/// Replace the device snapshot sent with the next heartbeats (T-P24).
+pub fn set_device_status(status: pb::DeviceStatus) {
+    if let Ok(mut slot) = device_status_slot().lock() {
+        *slot = Some(status);
+    }
+}
+
+fn current_device_status() -> Option<pb::DeviceStatus> {
+    device_status_slot().lock().ok().and_then(|s| s.clone())
+}
+
 fn heartbeat_frame(agent: &PairingAgent, credential: &str) -> pb::Heartbeat {
     static HEARTBEAT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
     pb::Heartbeat {
@@ -229,6 +248,7 @@ fn heartbeat_frame(agent: &PairingAgent, credential: &str) -> pb::Heartbeat {
         heartbeat_sequence: HEARTBEAT_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1,
         sent_at_mono_ns: monotonic_now_ns(),
         capabilities: Vec::new(),
+        status: current_device_status(),
     }
 }
 

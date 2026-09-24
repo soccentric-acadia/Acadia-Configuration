@@ -1388,3 +1388,91 @@ mod upload_coordinator_tests {
         assert_eq!(got.path, PathBuf::from("backup"));
     }
 }
+
+// ── T-P24: device status snapshot for the HQ heartbeat ────────────────────
+
+/// How often the heartbeat snapshot is refreshed.
+pub const STATUS_SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `VERSION` from os-release (quotes stripped).
+fn os_release_version(sysroot: &Sysroot) -> String {
+    std::fs::read_to_string(sysroot.join("/etc/os-release"))
+        .ok()
+        .and_then(|raw| {
+            raw.lines()
+                .find_map(|l| l.strip_prefix("VERSION="))
+                .map(|v| v.trim_matches('"').to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// systemd's view of clock synchronisation (timesyncd/chrony via timedated).
+fn time_synchronized(sysroot: &Sysroot) -> bool {
+    if !sysroot.is_real_root() {
+        return false;
+    }
+    std::process::Command::new("timedatectl")
+        .args(["show", "--property=NTPSynchronized", "--value"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "yes")
+        .unwrap_or(false)
+}
+
+impl DeviceOps {
+    /// Build one heartbeat snapshot from what the device already knows
+    /// (update backend, istate, systemd, os-release). Every source is
+    /// best-effort: an unreachable source leaves its fields empty.
+    pub async fn status_snapshot(&self) -> pb::DeviceStatus {
+        let mut status = pb::DeviceStatus {
+            image_version: os_release_version(&self.sysroot),
+            collected_at_unix_ms: now_unix_ms(),
+            ..Default::default()
+        };
+        status
+            .component_versions
+            .insert("webconfigd".into(), env!("CARGO_PKG_VERSION").into());
+        let backend = self.update_backend.clone();
+        if let Ok(Ok(slots)) = tokio::task::spawn_blocking(move || backend.slots()).await {
+            if let Some(running) = slots.iter().find(|s| s.running) {
+                status.running_slot = running.slot.clone();
+                status.slot_confirmed = running.confirmed;
+            }
+        }
+        if let Ok(snap) = self.istate.system_snapshot().await {
+            status.health_known = true;
+            status.health_score = snap.health_score;
+            status.serial = snap.serial;
+            status.hardware_revision = snap.hw_revision;
+            status.istate_state = snap.istate_state;
+            if !snap.suite_version.is_empty() {
+                status
+                    .component_versions
+                    .insert("instrumentation".into(), snap.suite_version);
+            }
+        }
+        for unit in &self.service_allowlist {
+            let active = match self.systemd.status(unit).await {
+                Ok(s) => s.active,
+                Err(_) => "unknown".into(),
+            };
+            status.services.push(pb::ServiceState {
+                unit: unit.clone(),
+                active,
+            });
+        }
+        let sysroot = self.sysroot.clone();
+        status.time_synchronized = tokio::task::spawn_blocking(move || time_synchronized(&sysroot))
+            .await
+            .unwrap_or(false);
+        status
+    }
+}
+
+/// Refresh the heartbeat snapshot forever (T-P24).
+pub async fn run_status_snapshot(ops: Arc<DeviceOps>) {
+    loop {
+        let status = ops.status_snapshot().await;
+        hq_agent::set_device_status(status);
+        tokio::time::sleep(STATUS_SNAPSHOT_INTERVAL).await;
+    }
+}

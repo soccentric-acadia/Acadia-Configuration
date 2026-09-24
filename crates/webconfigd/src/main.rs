@@ -108,6 +108,8 @@ async fn main() -> anyhow::Result<()> {
         pub_rx,
         agent_stop_rx,
     ));
+    // T-P24: periodic device snapshot carried by every heartbeat.
+    tokio::spawn(hq_bridge::run_status_snapshot(ops.clone()));
     // Device→HQ data bridge: istate spooled records → AgentLink frames.
     tokio::spawn(hq_bridge::run_data_bridge(
         ops,

@@ -3187,3 +3187,30 @@ async fn tp20_service_control_is_allowlist_gated() {
     let ok = ops.service_control(&unit, "restart").await;
     assert!(ok.success, "{}", ok.message);
 }
+
+// ── T-P24: heartbeat status snapshot ──────────────────────────────────────
+#[tokio::test]
+async fn tp24_status_snapshot_reports_services_and_versions() {
+    let (_app, state, _dir) = build_app_with_state().await;
+    let ops = tp20_ops(&state);
+    let status = ops.status_snapshot().await;
+    assert_eq!(
+        status
+            .component_versions
+            .get("webconfigd")
+            .map(String::as_str),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+    assert_eq!(
+        status.services.len(),
+        state.manifest.service_allowlist.len()
+    );
+    assert!(status.services.iter().all(|s| !s.active.is_empty()));
+    // istate is not running in tests: health stays unknown, never faked.
+    assert!(!status.health_known);
+    assert!(
+        !status.time_synchronized,
+        "fake root never claims a clock lock"
+    );
+    assert!(status.collected_at_unix_ms > 0);
+}
