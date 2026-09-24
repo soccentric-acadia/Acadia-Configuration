@@ -620,6 +620,45 @@ mod tests {
         assert!(err.starts_with("UNIMPLEMENTED"), "{err}");
     }
 
+    /// T-P25: every verb in the configuration operation catalog (the
+    /// contract HQ vendors) is accepted by this handler as a local op.
+    #[test]
+    fn every_catalog_verb_is_handled_locally() {
+        let ops = crate::api::operations::configuration_operations();
+        assert!(ops.len() >= 18, "catalog unexpectedly small: {}", ops.len());
+        for op in ops {
+            let name = op["name"].as_str().unwrap();
+            let mut cmd = command(
+                name,
+                r#"{"schema_version":1,"unit":"sshd.service","action":"restart","username":"u"}"#,
+            );
+            cmd.daemon = "configuration".into();
+            if let Some(word) = op.get("required_confirmation").and_then(|v| v.as_str()) {
+                cmd.required_confirmation = word.into();
+            }
+            match name {
+                "backup" => cmd.kind = Some(pb::command::Kind::TakeBackupNow(pb::TakeBackupNow {})),
+                "restore" => cmd.kind = Some(pb::command::Kind::Restore(pb::Restore::default())),
+                "factory_reset" => {
+                    cmd.kind = Some(pb::command::Kind::FactoryReset(pb::FactoryReset {}))
+                }
+                "apply_update" => {
+                    cmd.kind = Some(pb::command::Kind::ApplyUpdate(pb::ApplyUpdate::default()))
+                }
+                _ => {}
+            }
+            match IstateCommandHandler::normalize(&cmd) {
+                Ok(Action::Local(_)) => {}
+                // configuration.write needs a real signed envelope; reaching
+                // the signature gate proves the verb is routed locally.
+                Err(e) if name == "configuration.write" => {
+                    assert!(!e.starts_with("UNIMPLEMENTED"), "{name}: {e}")
+                }
+                other => panic!("{name} is not handled locally: {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn spoke_ops_relay_through_istate() {
         let mut cmd = command("status", "{}");
