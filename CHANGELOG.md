@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-09-25 — Task 014: IV&V client provisioning verified working (VB-3)
+
+- **Parent task:** `soccentric-acadia/Acadia` `tasks/014-device-provisioning-verification/`.
+- **Finding, no code change:** `integration-ivv.md` VB-3 and
+  `improvements.md` OS-062 both described `/etc/acadia/client.conf`
+  provisioning as missing. Re-reading `crates/webconfigd/src/api/provisioning.rs`
+  directly found `put_ivv_client` already implements it in full (validation,
+  privileged write, service restart), wired to a route and a frontend page,
+  with existing unit test coverage. The tracker entries were stale, not the
+  code — corrected upstream in `soccentric-acadia/Acadia`'s `improvements.md`.
+
 ## 2026-09-24 — Integration-production pass (T-P20…T-P35, backlog)
 
 - T-P20: HQ-driven power, update confirm/rollback, service control, log bundles and users.* on the device; power actions run 5 s after the ack. Typed HQ commands execute locally rather than being relayed to istate (`465e5e2`).
