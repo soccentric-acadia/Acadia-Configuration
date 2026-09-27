@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-09-26 — Task 010: on-target validation suite (validation-only record)
+
+- Task record added: `tasks/010-on-target-validation-suite/` — the Acadia root
+  now ships a Python validation suite (`validation/`) that validates the
+  Instrumentation stack on a flashed Raspberry Pi from an x86 host over SSH
+  (92 checks: deployed artifacts, unit/registration liveness, per-verb
+  `_ctrl` functional coverage, cross-daemon integration, socket-permission
+  contracts, contract-artifact pinning, opt-in resilience).
+- **No source changes in this repository.** Parent record:
+  Acadia root `tasks/010-on-target-validation-suite/`.
+
 ## 2026-09-24 — Integration-production pass (T-P20…T-P35, backlog)
 
 - T-P20: HQ-driven power, update confirm/rollback, service control, log bundles and users.* on the device; power actions run 5 s after the ack. Typed HQ commands execute locally rather than being relayed to istate (`465e5e2`).
