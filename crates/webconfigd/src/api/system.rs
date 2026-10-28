@@ -443,6 +443,10 @@ pub(crate) fn factory_reset_core(sysroot: &webconfig_engine::Sysroot, mode: &str
         // absence here is normal.
         remove_file_best_effort(&dir.join("cert.pem"), &mut failures);
         remove_file_best_effort(&dir.join("key.pem"), &mut failures);
+        // Pairing credentials are security material, not configuration. A
+        // reset must never leave a device able to reconnect as its prior
+        // enrollment; the immutable factory identity remains in /pst/factory.
+        remove_file_best_effort(&dir.join("pairing.json"), &mut failures);
         remove_dir_best_effort(&dir.join("certs"), &mut failures);
         if mode == "settings+users" {
             match rusqlite::Connection::open(&database) {

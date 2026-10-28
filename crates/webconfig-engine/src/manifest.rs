@@ -25,6 +25,8 @@ pub enum ManifestError {
     Io(#[from] std::io::Error),
     #[error("manifest not found at {0}")]
     NotFound(String),
+    #[error("unsupported Acadia hardware capability contract: {0}")]
+    UnsupportedCapability(String),
 }
 
 /// Kind of peripheral a manifest entry describes (spec §4.9 / §4.5 tiles).
@@ -128,6 +130,12 @@ pub struct BoardManifest {
     /// Human-readable board name.
     #[serde(default)]
     pub board_name: String,
+    /// Version of the Acadia-Hardware production capability matrix.
+    #[serde(default)]
+    pub hardware_matrix_version: String,
+    /// Exact board revision selected from the hardware capability matrix.
+    #[serde(default)]
+    pub hardware_board_revision: String,
     #[serde(default)]
     pub peripherals: Vec<Peripheral>,
     #[serde(default)]
@@ -173,7 +181,9 @@ impl BoardManifest {
             return Err(ManifestError::NotFound(path.display().to_string()));
         }
         let raw = std::fs::read_to_string(path)?;
-        Ok(serde_yaml::from_str(&raw)?)
+        let manifest: Self = serde_yaml::from_str(&raw)?;
+        manifest.validate_hardware_capability_contract()?;
+        Ok(manifest)
     }
 
     /// Load from `<share>/board-manifest.json`. Returns `NotFound` if absent.
@@ -183,7 +193,9 @@ impl BoardManifest {
             return Err(ManifestError::NotFound(path.display().to_string()));
         }
         let raw = std::fs::read_to_string(&path)?;
-        Ok(serde_json::from_str(&raw)?)
+        let manifest: Self = serde_json::from_str(&raw)?;
+        manifest.validate_hardware_capability_contract()?;
+        Ok(manifest)
     }
 
     /// Peripherals of a given kind.
@@ -195,6 +207,45 @@ impl BoardManifest {
     /// hardware the board does not have).
     pub fn has(&self, id: &str) -> bool {
         self.peripherals.iter().any(|p| p.id == id)
+    }
+
+    /// Reject Acadia manifests that do not match the published production
+    /// hardware matrix rather than allowing a technician override to expose
+    /// guessed or reserved hardware.
+    pub fn validate_hardware_capability_contract(&self) -> Result<(), ManifestError> {
+        if self.platform != "acadia" {
+            return Ok(());
+        }
+        if self.hardware_matrix_version != "1.0.0" {
+            return Err(ManifestError::UnsupportedCapability(
+                "matrix version must be 1.0.0".into(),
+            ));
+        }
+        if self.hardware_board_revision != "rpi5-cm5-bom-rev-c" {
+            return Err(ManifestError::UnsupportedCapability(
+                "board revision must be rpi5-cm5-bom-rev-c".into(),
+            ));
+        }
+        for peripheral in &self.peripherals {
+            match (peripheral.id.as_str(), peripheral.kind) {
+                ("ttyAMA0", IoKind::Serial) if peripheral.device == "/dev/ttyAMA0" => {}
+                ("ttyAMA2", IoKind::Serial) if peripheral.device == "/dev/ttyAMA2" => {}
+                ("mcu-pico", IoKind::Mcu)
+                    if peripheral.device == "/dev/ttyAMA2"
+                        && peripheral.caps.get("signed_fw")
+                            == Some(&serde_json::Value::Bool(true))
+                        && peripheral.caps.contains_key("firmware_pubkey_ed25519") => {}
+                ("can0", IoKind::Can)
+                    if peripheral.caps.get("fd") == Some(&serde_json::Value::Bool(false)) => {}
+                _ => {
+                    return Err(ManifestError::UnsupportedCapability(format!(
+                        "peripheral {} is not approved by matrix v1",
+                        peripheral.id
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -208,6 +259,30 @@ mod tests {
         let m: BoardManifest = serde_json::from_str(raw).unwrap();
         assert_eq!(m.platform, "acadia");
         assert!(!m.peripherals.is_empty());
+        m.validate_hardware_capability_contract().unwrap();
+    }
+
+    #[test]
+    fn acadia_manifest_rejects_wrong_revision_and_reserved_console() {
+        let mut m: BoardManifest =
+            serde_json::from_str(include_str!("../../../board-manifests/acadia.json")).unwrap();
+        m.hardware_board_revision = "rpi5-cm5-bom-rev-b".into();
+        assert!(matches!(
+            m.validate_hardware_capability_contract(),
+            Err(ManifestError::UnsupportedCapability(_))
+        ));
+
+        m.hardware_board_revision = "rpi5-cm5-bom-rev-c".into();
+        m.peripherals.push(Peripheral {
+            id: "ttyAMA10".into(),
+            device: "/dev/ttyAMA10".into(),
+            kind: IoKind::Serial,
+            ..Default::default()
+        });
+        assert!(matches!(
+            m.validate_hardware_capability_contract(),
+            Err(ManifestError::UnsupportedCapability(_))
+        ));
     }
 
     #[test]

@@ -16,7 +16,7 @@ use sha2::Digest;
 const PINNED: &[(&str, &str)] = &[
     (
         "common.proto",
-        "2279530e2fb5ec160e72aa1592b0dd02a1fa48f599893bbec85c760f6376752b",
+        "9a5f2a4613124f6f30ed56546f958765950f4ef7336cf0ac9e9fc64b2959ff5b",
     ),
     (
         "istate.proto",
@@ -98,4 +98,32 @@ fn configuration_api_surface_is_complete() {
             "ConfigurationApi is missing rpc {rpc} — the proto copy is stale"
         );
     }
+}
+
+#[test]
+fn production_contract_lock_matches_compiled_and_vendored_artifacts() {
+    let lock: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../contracts/instrumentation-production-contract-lock-v1.json"
+    ))
+    .expect("valid Instrumentation production contract lock");
+    assert_eq!(lock["proto_schema_version"], 3);
+    assert_eq!(
+        lock["descriptor"]["sha256"],
+        "8bd9d5e5ecb9b92770f0fc869181b67ab259a5a2428dc9cdb62fefc34fa3b469"
+    );
+
+    for (name, pinned_sha) in PINNED {
+        assert_eq!(
+            lock["configuration_protos"][*name],
+            *pinned_sha,
+            "{name} does not match the published production lock"
+        );
+    }
+
+    let catalog = include_str!("../../../contracts/instrumentation-operation-catalog.json");
+    assert_eq!(
+        format!("{:x}", sha2::Sha256::digest(catalog.as_bytes())),
+        lock["operation_catalog"]["sha256"].as_str().expect("catalog digest"),
+        "vendored Instrumentation operation catalog diverges from the production lock"
+    );
 }

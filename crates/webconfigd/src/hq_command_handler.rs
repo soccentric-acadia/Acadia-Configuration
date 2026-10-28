@@ -21,8 +21,9 @@
 use hq_agent::pb;
 
 use crate::hq_bridge::{
-    DeviceOps, REQUIRED_FACTORY_RESET_CONFIRMATION, REQUIRED_ROLLBACK_CONFIRMATION,
-    REQUIRED_SHUTDOWN_CONFIRMATION, SERVICE_ACTIONS,
+    DeviceOps, REQUIRED_APPLY_UPDATE_CONFIRMATION, REQUIRED_FACTORY_RESET_CONFIRMATION,
+    REQUIRED_RESTORE_CONFIRMATION, REQUIRED_ROLLBACK_CONFIRMATION,
+    REQUIRED_SERVICE_CONTROL_CONFIRMATION, REQUIRED_SHUTDOWN_CONFIRMATION, SERVICE_ACTIONS,
 };
 use crate::istate_client::{ControlRequest, IstateClient, SharedIstateClient};
 use std::sync::Arc;
@@ -190,6 +191,11 @@ impl IstateCommandHandler {
         let args = match command.kind.as_ref() {
             Some(pb::command::Kind::TakeBackupNow(_)) => LocalOp::BackupNow,
             Some(pb::command::Kind::Restore(value)) => {
+                if command.required_confirmation != REQUIRED_RESTORE_CONFIRMATION {
+                    return Err(format!(
+                        "PERMISSION_DENIED: restore requires required_confirmation = {REQUIRED_RESTORE_CONFIRMATION}"
+                    ));
+                }
                 LocalOp::Restore(value.backup_download_url.clone())
             }
             Some(pb::command::Kind::FactoryReset(_)) => {
@@ -201,6 +207,11 @@ impl IstateCommandHandler {
                 LocalOp::FactoryReset
             }
             Some(pb::command::Kind::ApplyUpdate(value)) => {
+                if command.required_confirmation != REQUIRED_APPLY_UPDATE_CONFIRMATION {
+                    return Err(format!(
+                        "PERMISSION_DENIED: apply update requires required_confirmation = {REQUIRED_APPLY_UPDATE_CONFIRMATION}"
+                    ));
+                }
                 LocalOp::ApplyUpdate(serde_json::json!({
                     "artifact_id": value.artifact_id,
                     "artifact_download_url": value.artifact_download_url,
@@ -246,6 +257,7 @@ impl IstateCommandHandler {
                 LocalOp::RollbackUpdate
             }
             "service.control" => {
+                confirm(REQUIRED_SERVICE_CONTROL_CONFIRMATION)?;
                 let v = args()?;
                 let unit = v.get("unit").and_then(|x| x.as_str()).unwrap_or("");
                 let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("");
@@ -535,6 +547,37 @@ mod tests {
         assert!(IstateCommandHandler::normalize(&cmd).is_ok());
     }
 
+    #[test]
+    fn restore_and_update_require_explicit_confirmations() {
+        let mut restore = pb::Command {
+            command_id: "restore-014".into(),
+            kind: Some(pb::command::Kind::Restore(pb::Restore {
+                backup_download_url: "https://hq.example/backup".into(),
+            })),
+            ..Default::default()
+        };
+        assert!(IstateCommandHandler::normalize(&restore)
+            .unwrap_err()
+            .starts_with("PERMISSION_DENIED"));
+        restore.required_confirmation = REQUIRED_RESTORE_CONFIRMATION.into();
+        assert!(IstateCommandHandler::normalize(&restore).is_ok());
+
+        let mut update = pb::Command {
+            command_id: "update-014".into(),
+            kind: Some(pb::command::Kind::ApplyUpdate(pb::ApplyUpdate {
+                artifact_id: "release-014".into(),
+                artifact_download_url: "https://hq.example/release".into(),
+                checksum_sha256: "a".repeat(64),
+            })),
+            ..Default::default()
+        };
+        assert!(IstateCommandHandler::normalize(&update)
+            .unwrap_err()
+            .starts_with("PERMISSION_DENIED"));
+        update.required_confirmation = REQUIRED_APPLY_UPDATE_CONFIRMATION.into();
+        assert!(IstateCommandHandler::normalize(&update).is_ok());
+    }
+
     /// T-P20: power/update/service/log/users verbs are device-local.
     #[test]
     fn tp20_verbs_are_local() {
@@ -543,10 +586,6 @@ mod tests {
             ("update.reboot_to_apply", "{}"),
             ("update.confirm", "{}"),
             ("log_bundle.request", "{}"),
-            (
-                "service.control",
-                r#"{"unit":"sshd.service","action":"restart"}"#,
-            ),
             ("users.list", "{}"),
             ("users.delete", r#"{"username":"bob"}"#),
         ] {
@@ -558,11 +597,16 @@ mod tests {
 
     #[test]
     fn tp20_destructive_verbs_need_confirmation() {
-        for (op, word) in [
-            ("system.shutdown", REQUIRED_SHUTDOWN_CONFIRMATION),
-            ("update.rollback", REQUIRED_ROLLBACK_CONFIRMATION),
+        for (op, word, args) in [
+            ("system.shutdown", REQUIRED_SHUTDOWN_CONFIRMATION, "{}"),
+            ("update.rollback", REQUIRED_ROLLBACK_CONFIRMATION, "{}"),
+            (
+                "service.control",
+                REQUIRED_SERVICE_CONTROL_CONFIRMATION,
+                r#"{"unit":"sshd.service","action":"restart"}"#,
+            ),
         ] {
-            let mut cmd = command(op, "{}");
+            let mut cmd = command(op, args);
             let err = IstateCommandHandler::normalize(&cmd).unwrap_err();
             assert!(err.starts_with("PERMISSION_DENIED"), "{op}: {err}");
             cmd.required_confirmation = word.into();
@@ -572,11 +616,12 @@ mod tests {
 
     #[test]
     fn tp20_argument_validation() {
-        let err = IstateCommandHandler::normalize(&command(
+        let mut service = command(
             "service.control",
             r#"{"unit":"sshd.service","action":"mask"}"#,
-        ))
-        .unwrap_err();
+        );
+        service.required_confirmation = REQUIRED_SERVICE_CONTROL_CONFIRMATION.into();
+        let err = IstateCommandHandler::normalize(&service).unwrap_err();
         assert!(err.starts_with("INVALID_ARGUMENT"));
         let err = IstateCommandHandler::normalize(&command("users.create", r#"{"role":"admin"}"#))
             .unwrap_err();
@@ -594,6 +639,7 @@ mod tests {
             artifact_download_url: "http://x/y".into(),
             checksum_sha256: "a".repeat(64),
         }));
+        cmd.required_confirmation = REQUIRED_APPLY_UPDATE_CONFIRMATION.into();
         assert!(matches!(
             IstateCommandHandler::normalize(&cmd).unwrap(),
             Action::Local(LocalOp::ApplyUpdate(_))
@@ -644,6 +690,16 @@ mod tests {
                 }
                 "apply_update" => {
                     cmd.kind = Some(pb::command::Kind::ApplyUpdate(pb::ApplyUpdate::default()))
+                }
+                _ => {}
+            }
+            match name {
+                "restore" => cmd.required_confirmation = REQUIRED_RESTORE_CONFIRMATION.into(),
+                "apply_update" => {
+                    cmd.required_confirmation = REQUIRED_APPLY_UPDATE_CONFIRMATION.into()
+                }
+                "service.control" => {
+                    cmd.required_confirmation = REQUIRED_SERVICE_CONTROL_CONFIRMATION.into()
                 }
                 _ => {}
             }
@@ -701,8 +757,8 @@ mod tests {
     }
 
     /// T-P13: an envelope signed by the HQ Ed25519 key verifies against the
-    /// provisioned key, over the canonical transport payload (envelope minus
-    /// the signature fields).
+    /// provisioned key, over the canonical cross-repository field set,
+    /// including the optional signing_key_id.
     #[test]
     fn write_verifies_ed25519_signature_against_provisioned_key() {
         let _guard = PUBKEY_ENV_LOCK.lock().unwrap();
@@ -715,15 +771,16 @@ mod tests {
             "schema_version": 1,
             "origin": "hq",
             "config": {"system": {"hostname": "signed-by-hq"}},
+            "signing_key_id": "generated-test-key",
             "signature_algorithm": "ed25519",
         });
-        // Canonical bytes = the contract fields ONLY (schema_version/origin/
-        // config) — the same subset canonicalization hq_bridge::signed_document
-        // performs.
+        // This is byte-for-byte the Python HQ signer's canonical JSON field
+        // set: schema_version, origin, config, and signing_key_id when present.
         let doc = serde_json::json!({
             "schema_version": 1,
             "origin": "hq",
             "config": {"system": {"hostname": "signed-by-hq"}},
+            "signing_key_id": "generated-test-key",
         });
         let sig = pair.sign(serde_json::to_vec(&doc).unwrap().as_slice());
         let envelope = {
@@ -745,6 +802,15 @@ mod tests {
         tampered["config"]["system"]["hostname"] = "tampered".into();
         std::env::set_var(crate::hq_bridge::HQ_CONFIG_PUBKEY_ENV, &pub_b64);
         let res = crate::hq_bridge::validate_write_envelope(&tampered);
+        std::env::remove_var(crate::hq_bridge::HQ_CONFIG_PUBKEY_ENV);
+        assert!(res.is_err());
+
+        // The active-key selector is signed too; replacing it must invalidate
+        // the signature before key-rotation policy can consider it.
+        let mut wrong_key_id = envelope.clone();
+        wrong_key_id["signing_key_id"] = "substituted-key".into();
+        std::env::set_var(crate::hq_bridge::HQ_CONFIG_PUBKEY_ENV, &pub_b64);
+        let res = crate::hq_bridge::validate_write_envelope(&wrong_key_id);
         std::env::remove_var(crate::hq_bridge::HQ_CONFIG_PUBKEY_ENV);
         assert!(res.is_err());
     }

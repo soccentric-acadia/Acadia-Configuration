@@ -106,3 +106,10 @@ There is no cloud deployment target here. Tests and `run-mock` cannot prove real
 the correct target binary, provision certificates and configuration according to the Yocto
 image, confirm the port and first-boot admin flow, and exercise restart/update behavior on
 target hardware. Keep release signing and deployment credentials outside the repository.
+# AgentLink credential policy
+
+The `hq-agent` durable enrollment record is
+`/pst/acadia/webconfig/pairing.json` (mode `0600`; parent `0700`). It stores
+the active credential, HQ-issued expiry, endpoint, and device ID atomically.
+See `Acadia-HQ/doc/AGENTLINK_CREDENTIAL_LIFECYCLE.md` for the authoritative
+renewal, revocation, five-minute clock-skew, and offline policy.

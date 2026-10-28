@@ -32,6 +32,7 @@ use crate::state::AppState;
 /// File names inside the WebConfig data dir.
 pub const HQ_CA_FILE: &str = "hq-ca.pem";
 pub const HQ_CONFIG_PUBKEY_FILE: &str = "hq-config-pub.pem";
+pub const HQ_CONFIG_KEY_ID_FILE: &str = "hq-config-key-id";
 const IVV_CLIENT_FILE: &str = "ivv-client.json";
 
 /// Image-baked fleet defaults (optional `acadia-hq-trust` recipe).
@@ -98,6 +99,10 @@ pub struct HqTrustRequest {
     /// configuration writes with.
     #[serde(default)]
     pub hq_config_pubkey_pem: Option<String>,
+    /// Stable identifier of the public key. Required when replacing the key
+    /// so a replay signed by a revoked predecessor cannot be accepted.
+    #[serde(default)]
+    pub hq_config_key_id: Option<String>,
 }
 
 fn valid_cert_pem(pem: &str) -> bool {
@@ -144,6 +149,15 @@ pub async fn put_hq_trust(
     }
     if let Some(key) = &req.hq_config_pubkey_pem {
         crate::hq_bridge::ed25519_pubkey_bytes(key).map_err(ApiError::BadRequest)?;
+        let key_id = req.hq_config_key_id.as_deref().unwrap_or("default");
+        if key_id.is_empty()
+            || key_id.len() > 128
+            || !key_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        {
+            return Err(ApiError::BadRequest("hq_config_key_id is invalid".into()));
+        }
     }
     let dir = app.engine.sysroot.webconfig_dir();
     std::fs::create_dir_all(&dir).map_err(|_| ApiError::Internal)?;
@@ -154,6 +168,10 @@ pub async fn put_hq_trust(
     }
     if let Some(key) = &req.hq_config_pubkey_pem {
         write_private(&dir.join(HQ_CONFIG_PUBKEY_FILE), key)?;
+        write_private(
+            &dir.join(HQ_CONFIG_KEY_ID_FILE),
+            req.hq_config_key_id.as_deref().unwrap_or("default"),
+        )?;
         changed.push("hq_config_key");
     }
     audit(

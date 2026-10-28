@@ -156,7 +156,17 @@ fn parse_compiled_in_manifest(platform: &str, raw: &str) -> BoardManifest {
         serde_json::from_str::<BoardManifest>(raw).map_err(|e| e.to_string())
     };
     match parsed {
-        Ok(manifest) => manifest,
+        Ok(manifest) => match manifest.validate_hardware_capability_contract() {
+            Ok(()) => manifest,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    %platform,
+                    "compiled-in fallback board manifest violates the hardware capability contract"
+                );
+                BoardManifest::default()
+            }
+        },
         Err(error) => {
             tracing::error!(
                 %error,

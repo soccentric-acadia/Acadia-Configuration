@@ -98,15 +98,20 @@ async fn main() -> anyhow::Result<()> {
     });
     let mailbox_for_agent = mailbox.clone();
     let bridge_stop = agent_stop_rx.clone();
+    let command_journal = std::env::var("HQ_COMMAND_JOURNAL")
+        .unwrap_or_else(|_| "/pst/acadia/webconfig/command-results.tsv".into());
     tokio::spawn(hq_agent::run_agent(
         pairing.clone(),
         hq_agent::GrpcConnector::default(),
-        hq_agent::IdempotentCommandHandler::new(hq_command_handler::IstateCommandHandler::new(
-            state.istate.clone(),
-            state.audit.clone(),
-            ops.clone(),
-            mailbox_for_agent,
-        )),
+        hq_agent::PersistentCommandHandler::open(
+            hq_command_handler::IstateCommandHandler::new(
+                state.istate.clone(),
+                state.audit.clone(),
+                ops.clone(),
+                mailbox_for_agent,
+            ),
+            command_journal,
+        )?,
         hq_bridge::UploadExecutor {
             coordinator: uploads,
             audit: state.audit.clone(),

@@ -21,6 +21,9 @@
 //! in-memory mock with no network. [`GrpcConnector`] is the tonic client.
 
 use std::collections::HashMap;
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
@@ -138,6 +141,162 @@ pub struct IdempotentCommandHandler<H> {
     inner: H,
     completed: Mutex<HashMap<String, CommandOutcome>>,
     capacity: usize,
+}
+
+/// Persistent terminal-result cache for AgentLink commands.
+///
+/// The gateway can legally redeliver a leased command after a reconnect.  A
+/// process-local cache is insufficient: webconfigd restarts would execute a
+/// destructive command twice.  This journal keeps only terminal outcomes and
+/// is atomically replaced after each completed command.  In-flight commands
+/// are deliberately not recorded as successful; a crash before a terminal
+/// result causes HQ to retry and the downstream operation's own command ID is
+/// used as its idempotency key.
+pub struct PersistentCommandHandler<H> {
+    inner: H,
+    completed: Mutex<HashMap<String, CommandOutcome>>,
+    journal: PathBuf,
+    capacity: usize,
+}
+
+impl<H> PersistentCommandHandler<H> {
+    pub fn open(inner: H, journal: impl Into<PathBuf>) -> io::Result<Self> {
+        let journal = journal.into();
+        let completed = load_command_journal(&journal)?;
+        Ok(Self {
+            inner,
+            completed: Mutex::new(completed),
+            journal,
+            capacity: 256,
+        })
+    }
+
+    fn store(&self, completed: &HashMap<String, CommandOutcome>) -> io::Result<()> {
+        if let Some(parent) = self.journal.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let temp = self.journal.with_extension("tmp");
+        let mut file = fs::File::create(&temp)?;
+        file.write_all(encode_command_journal(completed).as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(temp, &self.journal).and_then(|_| {
+            self.journal
+                .parent()
+                .map_or(Ok(()), |parent| fs::File::open(parent)?.sync_all())
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl<H: CommandHandler> CommandHandler for PersistentCommandHandler<H> {
+    async fn handle(&self, command: pb::Command) -> CommandOutcome {
+        let key = if command.idempotency_key.is_empty() {
+            command.command_id.clone()
+        } else {
+            command.idempotency_key.clone()
+        };
+        if key.is_empty() || (!command.command_id.is_empty() && key != command.command_id) {
+            return CommandOutcome::failure(
+                "INVALID_ARGUMENT",
+                "command_id and idempotency_key must be the same non-empty identifier",
+            );
+        }
+        if let Some(result) = self.completed.lock().unwrap().get(&key).cloned() {
+            return result;
+        }
+
+        let result = self.inner.handle(command).await;
+        let mut completed = self.completed.lock().unwrap();
+        if completed.len() >= self.capacity {
+            if let Some(oldest) = completed.keys().next().cloned() {
+                completed.remove(&oldest);
+            }
+        }
+        completed.insert(key.clone(), result.clone());
+        if let Err(error) = self.store(&completed) {
+            completed.remove(&key);
+            return CommandOutcome::failure(
+                "UNAVAILABLE",
+                format!("could not persist command terminal state: {error}"),
+            );
+        }
+        result
+    }
+}
+
+fn hex_encode(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn hex_decode(value: &str) -> Option<String> {
+    if value.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = (0..value.len())
+        .step_by(2)
+        .map(|offset| u8::from_str_radix(&value[offset..offset + 2], 16).ok())
+        .collect::<Option<Vec<_>>>()?;
+    String::from_utf8(bytes).ok()
+}
+
+fn load_command_journal(path: &Path) -> io::Result<HashMap<String, CommandOutcome>> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => return Err(error),
+    };
+    let mut completed = HashMap::new();
+    for line in contents.lines() {
+        let fields: Vec<_> = line.split('\t').collect();
+        if fields.len() != 5 {
+            continue;
+        }
+        let Some(key) = hex_decode(fields[0]) else {
+            continue;
+        };
+        let Some(code) = hex_decode(fields[2]) else {
+            continue;
+        };
+        let Some(message) = hex_decode(fields[3]) else {
+            continue;
+        };
+        let Some(json_payload) = hex_decode(fields[4]) else {
+            continue;
+        };
+        completed.insert(
+            key,
+            CommandOutcome {
+                success: fields[1] == "1",
+                code,
+                message,
+                json_payload,
+            },
+        );
+    }
+    Ok(completed)
+}
+
+fn encode_command_journal(completed: &HashMap<String, CommandOutcome>) -> String {
+    let mut rows: Vec<_> = completed.iter().collect();
+    rows.sort_by(|(left, _), (right, _)| left.cmp(right));
+    rows.into_iter()
+        .map(|(key, result)| {
+            format!(
+                "{}\t{}\t{}\t{}\t{}",
+                hex_encode(key),
+                if result.success { "1" } else { "0" },
+                hex_encode(&result.code),
+                hex_encode(&result.message),
+                hex_encode(&result.json_payload),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 impl<H> IdempotentCommandHandler<H> {
@@ -294,6 +453,11 @@ fn first_frame(agent: &PairingAgent) -> Result<Option<pb::AgentFrame>, AgentErro
             }))
         }
         PairingState::Enrolled => {
+            if agent.credential_expired() {
+                return Err(AgentError::Connect(
+                    "device credential expired — renew or re-provision required".into(),
+                ));
+            }
             let credential = agent
                 .credential()
                 .ok_or_else(|| AgentError::Connect("enrolled state without credential".into()))?
@@ -324,7 +488,9 @@ where
             if result.success {
                 {
                     let mut a = agent.lock().unwrap();
-                    a.set_credential(result.credential_token.clone());
+                    let expiry = (result.credential_expires_at_unix_ms > 0)
+                        .then(|| (result.credential_expires_at_unix_ms as u64) / 1000);
+                    a.set_credential(result.credential_token.clone(), expiry);
                     if !result.device_id.is_empty() {
                         a.set_device_id(result.device_id.clone());
                     }
@@ -354,6 +520,12 @@ where
         Some(pb::server_frame::Body::HeartbeatAck(ack)) => {
             {
                 let mut a = agent.lock().unwrap();
+                if !ack.renewed_credential_token.is_empty() {
+                    let expiry = (ack.credential_expires_at_unix_ms > 0)
+                        .then(|| (ack.credential_expires_at_unix_ms as u64) / 1000);
+                    a.set_credential(ack.renewed_credential_token.clone(), expiry);
+                    tracing::info!("HQ renewed device credential");
+                }
                 a.on_heartbeat();
                 if ack.next_heartbeat_interval_s > 0
                     && ack.next_heartbeat_interval_s as i64 != *heartbeat_interval
@@ -849,6 +1021,60 @@ mod tests {
     use std::collections::VecDeque;
     use tokio::sync::Mutex as AsyncMutex;
 
+    struct CountingHandler(Arc<AtomicU64>);
+
+    #[async_trait::async_trait]
+    impl CommandHandler for CountingHandler {
+        async fn handle(&self, _command: pb::Command) -> CommandOutcome {
+            let count = self.0.fetch_add(1, Ordering::SeqCst) + 1;
+            CommandOutcome::ok_json("OK", format!(r#"{{"count":{count}}}"#))
+        }
+    }
+
+    #[tokio::test]
+    async fn persistent_handler_replays_terminal_result_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("commands.tsv");
+        let calls = Arc::new(AtomicU64::new(0));
+        let command = pb::Command {
+            command_id: "command-014".into(),
+            idempotency_key: "command-014".into(),
+            ..Default::default()
+        };
+
+        let handler =
+            PersistentCommandHandler::open(CountingHandler(calls.clone()), journal.clone())
+                .unwrap();
+        let first = handler.handle(command.clone()).await;
+        assert_eq!(first.json_payload, r#"{"count":1}"#);
+        drop(handler);
+
+        let restarted =
+            PersistentCommandHandler::open(CountingHandler(calls.clone()), journal).unwrap();
+        let duplicate = restarted.handle(command).await;
+        assert_eq!(duplicate, first);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn persistent_handler_rejects_mismatched_command_identifiers() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = PersistentCommandHandler::open(
+            CountingHandler(Arc::new(AtomicU64::new(0))),
+            dir.path().join("commands.tsv"),
+        )
+        .unwrap();
+        let result = handler
+            .handle(pb::Command {
+                command_id: "command-014".into(),
+                idempotency_key: "different-command".into(),
+                ..Default::default()
+            })
+            .await;
+        assert!(!result.success);
+        assert_eq!(result.code, "INVALID_ARGUMENT");
+    }
+
     /// Scripted session: sends are recorded, replies are pre-queued.
     struct MockSession {
         sent: Arc<AsyncMutex<Vec<pb::AgentFrame>>>,
@@ -905,6 +1131,15 @@ mod tests {
         }
     }
 
+    fn future_expiry_ms() -> i64 {
+        (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_secs() as i64
+            + 86_400)
+            * 1000
+    }
+
     fn pairing_result(success: bool) -> pb::ServerFrame {
         pb::ServerFrame {
             body: Some(pb::server_frame::Body::PairingResult(pb::PairingResult {
@@ -924,6 +1159,7 @@ mod tests {
                 } else {
                     String::new()
                 },
+                credential_expires_at_unix_ms: if success { future_expiry_ms() } else { 0 },
             })),
         }
     }
@@ -934,6 +1170,8 @@ mod tests {
                 server_time_unix_ms: 0,
                 next_heartbeat_interval_s: interval,
                 protocol_version: AGENT_PROTOCOL_VERSION,
+                renewed_credential_token: String::new(),
+                credential_expires_at_unix_ms: 0,
             })),
         }
     }
@@ -947,7 +1185,7 @@ mod tests {
     fn enrolled(dir: &std::path::Path) -> Arc<std::sync::Mutex<PairingAgent>> {
         let mut a = PairingAgent::load(dir);
         a.provision("token-1".into(), "hq.example:50051".into(), 900);
-        a.set_credential("cred-1".into());
+        a.set_credential("cred-1".into(), None);
         a.set_device_id("dev-42".into());
         a.on_enrolled();
         Arc::new(std::sync::Mutex::new(a))
@@ -977,6 +1215,7 @@ mod tests {
         assert_eq!(a.state(), PairingState::Enrolled);
         assert_eq!(a.credential(), Some("long-lived-cred"));
         assert_eq!(a.device_id(), Some("dev-123"));
+        assert!(a.record().credential_expires_at_unix.is_some());
     }
 
     #[tokio::test]
@@ -1032,6 +1271,7 @@ mod tests {
                 "ack must record heartbeat"
             );
         }
+
         let sent = {
             let binding = session.lock().await;
             binding.sent.clone()
@@ -1046,6 +1286,58 @@ mod tests {
             }
         }
         assert!(cred_ok, "expected at least one heartbeat frame");
+    }
+
+    #[tokio::test]
+    async fn authenticated_renewal_replaces_the_stored_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = enrolled(dir.path());
+        let mut renewal = heartbeat_ack(30);
+        if let Some(pb::server_frame::Body::HeartbeatAck(ack)) = &mut renewal.body {
+            ack.renewed_credential_token = "renewed-cred".into();
+            ack.credential_expires_at_unix_ms = future_expiry_ms();
+        }
+        let (conn, _) = MockConnector::with_session(VecDeque::from([Ok(renewal)]));
+        let (tx, rx) = watch::channel(false);
+        let handle = tokio::spawn(run_agent(
+            agent.clone(),
+            conn,
+            NullCommandHandler,
+            (),
+            mailbox_channel().1,
+            rx,
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        tx.send(true).unwrap();
+        handle.abort();
+
+        let a = agent.lock().unwrap();
+        assert_eq!(a.credential(), Some("renewed-cred"));
+        assert!(a.record().credential_expires_at_unix.is_some());
+    }
+
+    #[test]
+    fn expired_or_revoked_credentials_do_not_open_agentlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = enrolled(dir.path());
+        {
+            let mut a = agent.lock().unwrap();
+            let expired = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock after unix epoch")
+                .as_secs()
+                .saturating_sub(301);
+            a.set_credential("expired-cred".into(), Some(expired));
+        }
+        assert!(first_frame(&agent.lock().unwrap())
+            .expect_err("expired credential must not open AgentLink")
+            .to_string()
+            .contains("expired"));
+
+        agent.lock().unwrap().on_revoked();
+        assert!(first_frame(&agent.lock().unwrap())
+            .expect("revoked state is not an error")
+            .is_none());
     }
 
     #[tokio::test]

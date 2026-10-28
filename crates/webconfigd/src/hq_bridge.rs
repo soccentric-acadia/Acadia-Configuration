@@ -41,6 +41,14 @@ use crate::istate_client::SharedIstateClient;
 /// gate for its own `factory-reset` op; the local path must not be weaker
 /// (task 009, H4).
 pub const REQUIRED_FACTORY_RESET_CONFIRMATION: &str = "FACTORY-RESET";
+/// A backup restore overwrites device state and must always carry an explicit
+/// operator confirmation from the authorization matrix.
+pub const REQUIRED_RESTORE_CONFIRMATION: &str = "RESTORE";
+/// Applying an artifact changes the booted software and is never implicit.
+pub const REQUIRED_APPLY_UPDATE_CONFIRMATION: &str = "APPLY-UPDATE";
+/// Service actions can take device management offline; require an intentional
+/// operator confirmation even for an allowlisted unit.
+pub const REQUIRED_SERVICE_CONTROL_CONFIRMATION: &str = "SERVICE-CONTROL";
 /// Confirmation an HQ `system.shutdown` must carry (T-P20): a remote
 /// shutdown cannot be undone from HQ — someone must power-cycle the unit.
 pub const REQUIRED_SHUTDOWN_CONFIRMATION: &str = "SHUTDOWN";
@@ -113,19 +121,26 @@ fn hq_config_pubkey() -> Option<Vec<u8>> {
 }
 
 /// The exact bytes HQ signs and the device verifies (T-P13, F09): the
-/// configuration contract fields ONLY — `{schema_version, origin, config}` —
-/// canonical JSON. Transport metadata (`signature`, `signature_algorithm`,
-/// `integration_status`) is excluded on both sides, so the signed bytes are
-/// exactly the three contract fields, sorted-key/compact (byte-identical to
-/// the HQ signer's `json.dumps(..., sort_keys=True, separators=(",", ":"),
-/// ensure_ascii=False)`).
+/// configuration contract fields ONLY — `{schema_version, origin, config,
+/// signing_key_id?}` — canonical JSON. Transport metadata (`signature`,
+/// `signature_algorithm`, `integration_status`) is excluded on both sides.
+/// The optional key ID is included whenever supplied, so it cannot be
+/// substituted after HQ signs a configuration.
 fn signed_document(envelope: &serde_json::Value) -> Result<Vec<u8>, String> {
-    let doc = serde_json::json!({
-        "schema_version": envelope.get("schema_version").ok_or("schema_version required")?,
-        "origin": envelope.get("origin").ok_or("origin required")?,
-        "config": envelope.get("config").ok_or("config required")?,
-    });
-    serde_json::to_vec(&doc).map_err(|e| e.to_string())
+    let mut doc = serde_json::Map::new();
+    for field in ["schema_version", "origin", "config"] {
+        doc.insert(
+            field.to_string(),
+            envelope
+                .get(field)
+                .ok_or_else(|| format!("{field} required"))?
+                .clone(),
+        );
+    }
+    if let Some(key_id) = envelope.get("signing_key_id") {
+        doc.insert("signing_key_id".to_string(), key_id.clone());
+    }
+    serde_json::to_vec(&serde_json::Value::Object(doc)).map_err(|e| e.to_string())
 }
 
 /// Envelope validation for `configuration.write` (task 009, H5; T-P13, F09).
@@ -155,6 +170,19 @@ pub fn validate_write_envelope(envelope: &serde_json::Value) -> Result<(), Strin
             "signature_algorithm must be ed25519 (got {algorithm:?}) — the transitional \
              HMAC path is retired (T-P13)"
         ));
+    }
+    // Key IDs are part of the signed document. Once a managed key has been
+    // provisioned, a rotation changes this local value and old key IDs are
+    // rejected even if their public material is still available elsewhere.
+    let dir = webconfig_engine::Sysroot::new().webconfig_dir();
+    if let Ok(expected) = std::fs::read_to_string(dir.join("hq-config-key-id")) {
+        let actual = envelope
+            .get("signing_key_id")
+            .and_then(|v| v.as_str())
+            .ok_or("signing_key_id is required for provisioned HQ key")?;
+        if actual != expected.trim() {
+            return Err("configuration signing key is revoked or not active".into());
+        }
     }
     let raw = envelope
         .get("signature")

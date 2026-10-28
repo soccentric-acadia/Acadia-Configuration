@@ -2,6 +2,8 @@
   "platform": "acadia",
   "model": "raspberry-pi-5",
   "board_name": "Raspberry Pi 5 (Acadia)",
+  "hardware_matrix_version": "1.0.0",
+  "hardware_board_revision": "rpi5-cm5-bom-rev-c",
   "has_rtc": true,
   "has_tpm": false,
   "secure_boot": false,
@@ -53,71 +55,9 @@
       }
     },
     {
-      "id": "can0",
-      "device": "can0",
-      "human_name": "CAN channel 0 (SPI HAT)",
-      "kind": "can",
-      "caps": {
-        "fd": false,
-        "termination_gpio": "gpio-can0-term"
-      }
-    },
-    {
-      "id": "i2c-1",
-      "device": "/dev/i2c-1",
-      "human_name": "I2C bus 1 (40-pin header)",
-      "kind": "i2c",
-      "caps": {}
-    },
-    {
-      "id": "i2c-10",
-      "device": "/dev/i2c-10",
-      "human_name": "RP1 I2C 10",
-      "kind": "i2c",
-      "caps": {}
-    },
-    {
-      "id": "spi0",
-      "device": "/dev/spidev0.0",
-      "human_name": "SPI bus 0",
-      "kind": "spi",
-      "caps": {}
-    },
-    {
-      "id": "gpio-led-system",
-      "device": "gpiochip4 line 6",
-      "human_name": "System status LED",
-      "kind": "gpio",
-      "caps": {
-        "direction": "out",
-        "active_low": false,
-        "function": "led",
-        "role": "system"
-      }
-    },
-    {
-      "id": "gpio-btn-recovery",
-      "device": "gpiochip4 line 7",
-      "human_name": "Recovery button",
-      "kind": "gpio",
-      "caps": {
-        "direction": "in",
-        "active_low": true
-      }
-    },
-    {
-      "id": "gpio-can0-term",
-      "device": "gpiochip4 line 9",
-      "human_name": "CAN0 termination",
-      "kind": "gpio",
-      "caps": {
-        "direction": "out"
-      }
-    },
-    {
       "id": "mcu-pico",
-      "device": "/dev/ttyACM0",
-      "human_name": "Pico W (RP2040) companion MCU",
+      "device": "/dev/ttyAMA2",
+      "human_name": "Pico W co-processor link (RP1 UART2, GPIO0/1)",
       "kind": "mcu",
       "caps": {
         "protocol": "soccentric-mcu",
@@ -125,39 +65,16 @@
         "settings_schema": "app:mcu-stm32",
         "firmware_pubkey_ed25519": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
         "flash_command": "/usr/local/bin/pico-flash",
-        "_firmware_pubkey_note": "ED25519 public trust anchor for Pico W firmware signing (task 41). The matching private key is controlled by the hardware secret store and is NEVER committed; this hex is the public verification key the MCU flash path verifies against. Rotate via the firmware release workflow, not by editing this file alone."
+        "hil_verify": "uart2 overlay device node"
       }
     },
     {
-      "id": "cam0",
-      "device": "/dev/video0",
-      "human_name": "RP1 CSI camera 0",
-      "kind": "camera",
-      "caps": {}
-    },
-    {
-      "id": "thermal-zone-0",
-      "device": "/sys/class/thermal/thermal_zone0",
-      "human_name": "SoC thermal zone",
-      "kind": "thermal",
+      "id": "can0",
+      "device": "can0",
+      "human_name": "CAN channel 0 (SPI HAT)",
+      "kind": "can",
       "caps": {
-        "throttle": true
-      }
-    },
-    {
-      "id": "eth0",
-      "device": "eth0",
-      "human_name": "Ethernet 0 (RPi5 GbE / RP1)",
-      "kind": "net",
-      "caps": {}
-    },
-    {
-      "id": "wlan0",
-      "device": "wlan0",
-      "human_name": "Wi-Fi",
-      "kind": "net",
-      "caps": {
-        "ap": true
+        "fd": false
       }
     }
   ],

@@ -15,6 +15,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 /// Maximum backoff before the next retry (cap), and the base per attempt.
 pub const MAX_BACKOFF_SECS: u64 = 300;
@@ -45,6 +47,10 @@ pub struct PairingRecord {
     pub hq_endpoint: String,
     /// Monotonic deadline (unix secs) until which the token is valid.
     pub token_expires_at_unix: Option<u64>,
+    /// Expiry of the enrolled device credential, when HQ issues one.  This is
+    /// deliberately separate from the one-time pairing-token deadline.
+    #[serde(default)]
+    pub credential_expires_at_unix: Option<u64>,
     /// Last successful heartbeat (unix secs).
     pub last_heartbeat_at: Option<u64>,
     /// Retry counter + next-backoff deadline for the retry loop.
@@ -79,6 +85,7 @@ impl Default for PairingRecord {
             credential_token: None,
             hq_endpoint: String::new(),
             token_expires_at_unix: None,
+            credential_expires_at_unix: None,
             last_heartbeat_at: None,
             retry_count: 0,
             retry_after_unix: None,
@@ -108,9 +115,17 @@ impl PairingAgent {
     fn persist(&self) {
         if let Some(dir) = self.path.parent() {
             let _ = std::fs::create_dir_all(dir);
+            #[cfg(unix)]
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
         }
         if let Ok(raw) = serde_json::to_string(&self.record) {
-            let _ = std::fs::write(&self.path, raw);
+            let temporary = self.path.with_extension("json.new");
+            if std::fs::write(&temporary, raw).is_ok() {
+                #[cfg(unix)]
+                let _ =
+                    std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600));
+                let _ = std::fs::rename(temporary, &self.path);
+            }
         }
     }
 
@@ -138,8 +153,12 @@ impl PairingAgent {
 
     /// Store the long-lived credential issued by HQ at enrollment
     /// (X5-001: replaces the single-use pairing token on the next connect).
-    pub fn set_credential(&mut self, credential: String) {
+    pub fn set_credential(&mut self, credential: String, expires_at_unix: Option<u64>) {
         self.record.credential_token = Some(credential);
+        self.record.credential_expires_at_unix = expires_at_unix;
+        // Pairing tokens are single-use and must never become a fallback
+        // credential after enrollment.
+        self.record.token_expires_at_unix = None;
         self.persist();
     }
 
@@ -150,6 +169,7 @@ impl PairingAgent {
         self.record.credential_token = Some(token);
         self.record.hq_endpoint = hq_endpoint;
         self.record.token_expires_at_unix = Some(now + ttl_secs);
+        self.record.credential_expires_at_unix = None;
         self.record.retry_count = 0;
         self.record.retry_after_unix = None;
         self.persist();
@@ -219,6 +239,27 @@ impl PairingAgent {
             Some(exp) => now_unix() >= exp,
             None => false,
         }
+    }
+
+    /// Credentials are allowed a small bounded clock-skew window.  HQ remains
+    /// authoritative (it validates expiry on every frame); this only prevents
+    /// a target with a slightly fast clock from discarding a still-valid
+    /// credential while it is offline.
+    pub fn credential_expired(&self) -> bool {
+        const CLOCK_SKEW_SECS: u64 = 300;
+        self.record
+            .credential_expires_at_unix
+            .is_some_and(|expiry| now_unix() > expiry.saturating_add(CLOCK_SKEW_SECS))
+    }
+
+    /// Remove local enrollment material during factory reset. The immutable
+    /// OS/factory serial is intentionally not owned by this record.
+    pub fn clear_enrollment(data_dir: &std::path::Path) -> std::io::Result<()> {
+        let path = data_dir.join("pairing.json");
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
     }
 
     pub fn record(&self) -> &PairingRecord {
@@ -299,5 +340,25 @@ mod tests {
         agent.on_heartbeat();
         assert_eq!(agent.record().retry_count, 0);
         assert_eq!(agent.retry_allowed(), PairingOutcome::Ok);
+    }
+
+    #[test]
+    fn enrollment_uses_private_atomic_state_and_can_be_wiped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut agent = PairingAgent::load(dir.path());
+        agent.provision("pairing-token".into(), "hq".into(), 600);
+        agent.set_credential("device-credential".into(), Some(now_unix() - 301));
+        assert!(agent.credential_expired());
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(dir.path().join("pairing.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        PairingAgent::clear_enrollment(dir.path()).unwrap();
+        assert!(!dir.path().join("pairing.json").exists());
     }
 }

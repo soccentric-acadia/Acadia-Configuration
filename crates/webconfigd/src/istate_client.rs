@@ -170,6 +170,11 @@ impl GrpcIstateClient {
 }
 
 fn validate(request: &ControlRequest) -> Result<serde_json::Value, IstateError> {
+    if request.request_id.is_empty() || request.request_id.len() > 128 {
+        return Err(IstateError::InvalidArgument(
+            "request_id must be a non-empty command identifier of at most 128 bytes".into(),
+        ));
+    }
     if request.daemon.len() > 128 || request.operation.len() > 128 {
         return Err(IstateError::InvalidArgument(
             "daemon or operation too long".into(),
@@ -190,6 +195,19 @@ fn validate(request: &ControlRequest) -> Result<serde_json::Value, IstateError> 
     Ok(value)
 }
 
+/// The current Instrumentation `ControlRequest` has a uint64 request ID while
+/// AgentLink has a string command ID.  Preserve a stable, non-zero correlation
+/// value until the protobuf grows a string command_id field; parsing UUIDs or
+/// silently sending zero made reconnect deduplication impossible.
+fn stable_request_id(command_id: &str) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let hash = command_id.as_bytes().iter().fold(OFFSET, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(PRIME)
+    });
+    hash.max(1)
+}
+
 #[async_trait::async_trait]
 impl IstateClient for GrpcIstateClient {
     async fn control(&self, request: ControlRequest) -> Result<ControlReply, IstateError> {
@@ -200,7 +218,7 @@ impl IstateClient for GrpcIstateClient {
             op: request.operation,
             json_args: request.json_args,
             actor: request.actor,
-            request_id: request.request_id.parse().unwrap_or(0),
+            request_id: stable_request_id(&request.request_id),
             deadline_ms: request.deadline_ms,
         };
         let reply = tokio::time::timeout(timeout, async {
@@ -385,6 +403,39 @@ mod tests {
             validate(&scalar),
             Err(IstateError::InvalidArgument(_))
         ));
+        scalar.request_id.clear();
+        assert!(matches!(
+            validate(&scalar),
+            Err(IstateError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn command_identifier_has_a_stable_nonzero_instrumentation_correlation() {
+        let first = stable_request_id("command-014-reconnect");
+        assert_ne!(first, 0);
+        assert_eq!(first, stable_request_id("command-014-reconnect"));
+        assert_ne!(first, stable_request_id("command-014-different"));
+    }
+
+    #[test]
+    fn authorization_matrix_matches_local_destructive_confirmations() {
+        let matrix: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../contracts/command-authorization-matrix-v1.json"
+        ))
+        .unwrap();
+        let operations = matrix["operations"].as_array().unwrap();
+        let confirmation = |operation: &str| {
+            operations
+                .iter()
+                .find(|entry| entry["operation"] == operation)
+                .and_then(|entry| entry["confirmation"].as_str())
+        };
+        assert_eq!(confirmation("backup.restore"), Some("RESTORE"));
+        assert_eq!(confirmation("system.factory_reset"), Some("FACTORY-RESET"));
+        assert_eq!(confirmation("update.apply"), Some("APPLY-UPDATE"));
+        assert_eq!(confirmation("update.rollback"), Some("ROLLBACK"));
+        assert_eq!(confirmation("service.control"), Some("SERVICE-CONTROL"));
     }
 
     #[tokio::test]
